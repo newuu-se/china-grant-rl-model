@@ -93,7 +93,7 @@ def build_policy(checkpoint_path: str) -> PPOPolicy:
     return policy
 
 
-def run_episode(policy: PPOPolicy, output_path: str) -> None:
+def run_episode(policy: PPOPolicy, output_path: str, stochastic: bool = False) -> None:
     env = NeTrainSimEnv()
     obs, _ = env.reset()
 
@@ -111,11 +111,15 @@ def run_episode(policy: PPOPolicy, output_path: str) -> None:
     print("-" * 80)
 
     while not (terminated or truncated):
-        # Policy picks action deterministically (greedy — highest probability notch)
+        # Deterministic (argmax) by default; --stochastic samples from the policy.
+        # NOTE: for a high-entropy policy the argmax can be unrepresentative (its mode
+        # parks at the lowest-energy notch); --stochastic reflects the trained behavior.
         obs_tensor = torch.tensor(obs, dtype=torch.float32, device=DEVICE).unsqueeze(0)
         with torch.no_grad():
-            logits, _ = policy.actor(obs_tensor)
-            notch = int(logits.argmax(dim=-1).item())
+            probs, _ = policy.actor(obs_tensor)
+            probs = probs.squeeze(0)
+            notch = (int(torch.distributions.Categorical(probs).sample())
+                     if stochastic else int(probs.argmax().item()))
 
         obs, reward, terminated, truncated, _ = env.step(notch)
 
@@ -130,6 +134,7 @@ def run_episode(policy: PPOPolicy, output_path: str) -> None:
         y_m = float(np.interp(position_m, cum_pos, ys))
 
         rows.append({
+            "position_m": round(position_m, 3),
             "x_m":       round(x_m, 3),
             "y_m":       round(y_m, 3),
             "speed_mps": round(speed_mps, 4),
@@ -137,25 +142,29 @@ def run_episode(policy: PPOPolicy, output_path: str) -> None:
         })
 
         step += 1
-        if step % 500 == 0:
+        if step % 100 == 0:
             print(f"{step:>6}  {position_m:>10.1f}  {x_m:>12.1f}  {y_m:>12.1f}  "
-                  f"{speed_mps:>10.3f}  {notch:>5}  {cum_energy:>10.3f}")
+                  f"{speed_mps:>10.3f}  {notch:>5}  {env._cum_energy_kwh:>10.3f}")
 
+    # Totals from the env (correct under action-repeat: sums every simulator second,
+    # not just the last one of each control interval).
+    total_energy = env._cum_energy_kwh
+    sim_steps = env._step_count
     env.close()
 
     status = "ARRIVED" if terminated else "TIMEOUT"
-    print(f"\n[{status}] steps={step}  total_energy={cum_energy:.2f} kWh\n")
+    print(f"\n[{status}] decisions={step}  sim_steps={sim_steps}  total_energy={total_energy:.2f} kWh\n")
 
     # Write CSV
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    fieldnames = ["x_m", "y_m", "speed_mps", "notch"]
+    fieldnames = ["position_m", "x_m", "y_m", "speed_mps", "notch"]
     with open(output_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
     print(f"Notch profile saved → {output_path}")
-    print(f"Rows: {len(rows)}  |  Total energy: {cum_energy:.2f} kWh  |  Steps: {step}")
+    print(f"Rows: {len(rows)} (control decisions)  |  Total energy: {total_energy:.2f} kWh  |  sim_steps: {sim_steps}")
 
 
 def main():
@@ -164,13 +173,16 @@ def main():
                         help="Path to .pth checkpoint (default: latest in checkpoints/)")
     parser.add_argument("--output", default=None,
                         help="Output CSV path (default: results/notch_profile.csv)")
+    parser.add_argument("--stochastic", action="store_true",
+                        help="Sample actions from the policy instead of argmax "
+                             "(representative for a high-entropy policy)")
     args = parser.parse_args()
 
     checkpoint = args.checkpoint or find_latest_checkpoint()
     output_path = args.output or os.path.join(OUTPUT_DIR, "notch_profile.csv")
 
     policy = build_policy(checkpoint)
-    run_episode(policy, output_path)
+    run_episode(policy, output_path, stochastic=args.stochastic)
 
 
 if __name__ == "__main__":

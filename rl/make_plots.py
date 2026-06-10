@@ -36,7 +36,7 @@ os.makedirs(OUTDIR, exist_ok=True)
 NOTCH = [8, 6, 5, 4, 3, 2]
 STEPS = [5603, 5654, 5716, 5888, 6337, 7706]
 ENERGY = [912.47, 909.28, 896.94, 881.53, 834.13, 783.52]
-RL_STEPS, RL_ENERGY = 7708, 784.16       # RL greedy eval (pace-penalty run)
+RL_STEPS, RL_ENERGY = 6113, 887.0        # RL eval, iteration 6 (coarse control, sampled policy)
 
 # ── shared "advanced" styling ────────────────────────────────────────────────
 plt.rcParams.update({
@@ -74,12 +74,16 @@ def load_links():
 
 
 def load_profile():
-    speed, notch = [], []
+    pos, speed, notch = [], [], []
     with open(PROFILE) as f:
         for row in csv.DictReader(f):
             speed.append(float(row["speed_mps"])); notch.append(int(row["notch"]))
+            if "position_m" in row:
+                pos.append(float(row["position_m"]))
     speed = np.array(speed)
-    return np.cumsum(speed), speed, np.array(notch)
+    # Use true position if present (correct under action-repeat); else fall back.
+    dist = np.array(pos) if len(pos) == len(speed) else np.cumsum(speed)
+    return dist, speed, np.array(notch)
 
 
 def load_nts():
@@ -128,7 +132,7 @@ def plot_tradeoff():
 
     # RL greedy policy
     ax.scatter([RL_STEPS], [RL_ENERGY], color=RLC, s=320, marker="*", zorder=5,
-               edgecolors="white", linewidths=1.5, label=f"RL policy  ({RL_ENERGY:.0f} kWh, {RL_STEPS:,} s)")
+               edgecolors="white", linewidths=1.5, label=f"RL policy (sampled)  ({RL_ENERGY:.0f} kWh, {RL_STEPS:,} s)")
     # NeTrainSim native driver
     if nts:
         nts_e = float(nts["energy_cum"][-1]); nts_s = nts["steps"]
@@ -183,7 +187,7 @@ def plot_profile():
     axes[0].plot(dist / 1000, speed, color=ACCENT, lw=1, label="train speed")
     axes[0].plot(cum[1:] / 1000, spd_lim, color=NTSC, lw=1, alpha=.7, ls="--", label="speed limit")
     axes[0].set_ylabel("speed (m/s)"); axes[0].legend(loc="upper right", fontsize=9)
-    axes[0].set_title(f"RL greedy policy along the route  ({RL_ENERGY:.0f} kWh, {RL_STEPS:,} s)")
+    axes[0].set_title(f"RL policy (sampled, iter 6) along the route  ({RL_ENERGY:.0f} kWh, {RL_STEPS:,} s)")
     axes[1].step(dist / 1000, notch, where="post", color=RLC, lw=1)
     axes[1].set_ylabel("notch"); axes[1].set_ylim(-0.5, 8.5)
     axes[2].fill_between(cum[1:] / 1000, grade, color="#6b7280", alpha=.5, step="mid")

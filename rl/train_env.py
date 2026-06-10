@@ -42,6 +42,11 @@ MAX_STEPS      = 12_000  # hard ceiling; slowest sensible trip (constant notch 2
 DEADLINE_STEPS = 6_500   # schedule deadline (s). Physical floor ≈ 5,025 s (speed-limit-bound);
                          # fastest feasible ≈ 5,600 s (notch 8); eco-optimal constant notch 3 ≈
                          # 6,446 s. 6,500 leaves room to coast for energy while staying on schedule.
+CONTROL_INTERVAL = 15    # action repeat: hold each chosen notch this many simulator seconds, so the
+                         # agent makes ~470 decisions per trip instead of ~7,000. Shortening the
+                         # decision horizon ~15x makes the long-horizon credit assignment tractable —
+                         # the prerequisite for learning terrain-aware notch modulation (1-second
+                         # control kept collapsing to a single near-constant notch).
 
 # ── Reward weights ──────────────────────────────────────────────────────────
 # Goal: minimize trip energy SUBJECT TO arriving by the deadline. The schedule is
@@ -148,17 +153,33 @@ class NeTrainSimEnv(gym.Env):
         if notch < 0 or notch > 8:
             raise ValueError(f"Action notch must be in [0, 8], got {notch}")
 
+        # Coarse control (action repeat): hold the chosen notch for CONTROL_INTERVAL
+        # simulator seconds, summing reward, then decide again. Fewer, longer
+        # decisions → tractable credit assignment → terrain-aware notch modulation.
+        total_reward = 0.0
+        terminated = truncated = False
+        step_energy_kwh = 0.0
+        for _ in range(CONTROL_INTERVAL):
+            r, terminated, truncated, step_energy_kwh = self._sim_step(notch)
+            total_reward += r
+            if terminated or truncated:
+                break
+
+        obs = self._state_to_obs(self._last_state, step_energy_kwh)
+        # Empty info dict — tianshou 0.5.1 Batch rejects new keys via index assignment.
+        return obs, float(total_reward), terminated, truncated, {}
+
+    def _sim_step(self, notch: int):
+        """Advance the simulator one second at the given notch; return
+        (reward, terminated, truncated, step_energy_kwh)."""
         state = self._send_action_and_read_state(notch)
         self._last_state = state
         self._step_count += 1
 
-        # energy_kwh from the simulator is per-step energy (not cumulative).
-        # EnergyConsumption_KWH in the CSV oscillates 0–0.2 kWh per step
-        # depending on throttle; cumEnergyStat (total) reaches ~1,200 kWh.
+        # energy_kwh from the simulator is per-step energy (not cumulative); it
+        # oscillates ~0–0.2 kWh/step depending on throttle.
         step_energy_kwh = float(state["energy_kwh"])
         self._cum_energy_kwh += step_energy_kwh
-
-        obs = self._state_to_obs(state, step_energy_kwh)
         speed_mps = float(state["speed_mps"])
         max_speed = float(state["link_max_speed_mps"])
         position_m = float(state["position_m"])
@@ -170,24 +191,15 @@ class NeTrainSimEnv(gym.Env):
 
         # Per-step pace penalty: penalize lagging the constant pace needed to reach
         # the terminus by DEADLINE_STEPS. Zero when on/ahead of schedule, so the
-        # agent coasts freely to save energy where it has slack — but crawling (which
-        # falls behind the pace) is penalized immediately, not just at the terminus
-        # (a terminal-only penalty was ignored: the greedy policy crawled to 820 kWh
-        # but 10,700 steps because per-step energy reward dominated its mode).
+        # agent coasts freely where it has slack; lagging is penalized immediately.
         target_pos_m = (self._step_count / DEADLINE_STEPS) * TOTAL_ROUTE_LENGTH_M
         behind_frac  = max(0.0, target_pos_m - position_m) / TOTAL_ROUTE_LENGTH_M
         pace_penalty = W_PACE * behind_frac
 
-        # Over-speed penalty: safety net only. The simulator physically caps
-        # speed at the link limit, so this rarely fires.
+        # Over-speed penalty: safety net only (sim hard-caps speed at the limit).
         speed_over_penalty = W_OVERSPEED * max(0.0, speed_mps - max_speed)
 
-        reward = (
-            -W_ENERGY * step_energy_kwh
-            - pace_penalty
-            - speed_over_penalty
-        )
-
+        reward = -W_ENERGY * step_energy_kwh - pace_penalty - speed_over_penalty
         if terminated:
             reward += ARRIVAL_BONUS
         elif truncated:
@@ -208,6 +220,7 @@ class NeTrainSimEnv(gym.Env):
                 f"  {elapsed:.1f}s",
                 flush=True,
             )
+        return reward, terminated, truncated, step_energy_kwh
 
         # Return empty info dict — tianshou 0.5.1 Batch cannot create new keys
         # via index assignment, so any non-empty info dict causes a ValueError.

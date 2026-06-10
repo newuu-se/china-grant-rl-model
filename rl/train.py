@@ -55,7 +55,8 @@ EPISODES_PER_COLLECT = NUM_TRAIN_ENVS   # 8 parallel episodes before each update
 EPISODES_PER_TEST    = 1
 REPEAT_PER_COLLECT   = 4                # PPO reuses each collected batch 4×
 BATCH_SIZE           = 2048
-STEP_PER_EPOCH       = 7_000
+STEP_PER_EPOCH       = 3_000   # env-steps/epoch. With CONTROL_INTERVAL=15 an episode is ~470
+                               # env-steps (not ~7k), so 3k ≈ one 8-episode collect per epoch
 
 # PPO / network architecture — single source of truth, also imported by evaluate.py
 # so the eval-time policy can never drift from the trained one.
