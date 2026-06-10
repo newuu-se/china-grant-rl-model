@@ -36,30 +36,53 @@ NODES_FILE  = os.path.join(_REPO, "data", "netrainsim_v2", "nodesFile_v2_fixed.d
 LINKS_FILE  = os.path.join(_REPO, "data", "netrainsim_v2", "linksFile_v2_fixed_speed.dat")
 TRAINS_FILE = os.path.join(_REPO, "data", "netrainsim_v2", "trainsFile_rl.dat")
 
-TOTAL_ROUTE_LENGTH_M = 74_891.29  # sum of all 1499 link lengths (linksFile_v2_fixed.dat)
+TOTAL_ROUTE_LENGTH_M = 74_891.29  # sum of all 1499 link lengths (linksFile_v2_fixed_speed.dat)
 STATE_PREFIX = "NTS_JSON "
-MAX_STEPS    = 10_000  # hard ceiling above the nominal ~6,700-step trip
-TARGET_STEPS = 4_500   # schedule target: trips longer than this incur a time penalty
+MAX_STEPS      = 12_000  # hard ceiling; slowest sensible trip (constant notch 2) is ~7,900 steps
+DEADLINE_STEPS = 6_500   # schedule deadline (s). Physical floor ≈ 5,025 s (speed-limit-bound);
+                         # fastest feasible ≈ 5,600 s (notch 8); eco-optimal constant notch 3 ≈
+                         # 6,446 s. 6,500 leaves room to coast for energy while staying on schedule.
 
-# Reward shaping — calibrated so completing the trip dominates any "stop early" strategy.
-# Each meter forward earns a small reward; total summed over a complete trip equals PROGRESS_BONUS.
-PROGRESS_BONUS    = 1500.0   # roughly cancels typical energy cost (~1050 kWh) over a complete trip
-ARRIVAL_BONUS     = 200.0    # one-shot reward at terminus
-TIMEOUT_PENALTY   = 1500.0   # large enough that giving up is never the best option
-TIME_COST_PER_STEP = 0.05    # late-arrival penalty per step over TARGET_STEPS
+# ── Reward weights ──────────────────────────────────────────────────────────
+# Goal: minimize trip energy SUBJECT TO arriving by the deadline. The schedule is
+# enforced PER-STEP via a pace penalty (not a terminal lump sum): with a strong
+# per-step energy reward, a distant terminal late-penalty can't override the
+# immediate per-step gain of running the lowest notch over a ~6k-step episode, so
+# the deterministic policy crawls (observed: greedy mode = notch 1, 820 kWh but
+# 10,700 steps). A per-step pace penalty makes lagging costly immediately.
+#   r_t = -W_ENERGY*energy_t                 (the objective — kWh this step)
+#         -W_PACE*max(0, behind_fraction)    (per-step: lagging the deadline pace → penalty)
+#         -W_OVERSPEED*overspeed_t           (speed cap; rarely active, sim caps speed)
+#   terminal(arrived):  +ARRIVAL_BONUS
+#   truncated(timeout): -TIMEOUT_PENALTY
+# behind_fraction = max(0, step/DEADLINE_STEPS*route_len - position) / route_len, so
+# the penalty is ZERO when on/ahead of schedule — the agent coasts freely where it
+# has slack and is pushed to keep pace only when lagging. Constant-notch curve
+# (current physics): n8=912 kWh/5603 s, n4=882/5888, n3=834/6337, n2=784/7706; the
+# slowest ON-schedule (≤6500 steps) trajectory ≈ notch 3, so ~834 kWh is the eco target.
+W_ENERGY        = 3.0      # per kWh — amplified so the fast→eco energy gap is a strong,
+                           # learnable gradient (at W_ENERGY=1 the eco gain was only ~5% of reward)
+W_PACE          = 2.0      # per-step penalty per (fraction-of-route) BEHIND the deadline pace;
+                           # zero when on/ahead → coast freely; lagging → pushed to keep pace.
+                           # Replaces the terminal-only late penalty the crawling mode ignored.
+W_OVERSPEED     = 1.0      # per (m/s) over the link limit (safety net; sim hard-caps speed)
+ARRIVAL_BONUS   = 200.0    # one-shot reward at terminus
+TIMEOUT_PENALTY = 1500.0   # large enough that giving up is never the best option
 
-# Speed-deficit penalty: punish going slower than the link's speed limit.
-# Without this, the agent picks the lowest possible constant notch (notch=1)
-# because per-step (energy-cost vs progress-reward) is roughly flat across
-# notches. With this penalty the agent must adapt notch to terrain to keep
-# speed near the limit, so notch varies by grade and speed-limit zone.
-SPEED_DEFICIT_COEF = 0.02    # penalty per step per (m/s) below speed limit
+# No progress-shaping term. With near-undiscounted DISCOUNT (0.9999 in train.py)
+# the arrival bonus / timeout penalty propagate back across the full ~6k-step
+# episode, so completion is incentivized directly and the reward stays a clean,
+# interpretable proxy for the objective (minimize total energy + time). Earlier
+# designs added a progress reward to force completion, but under heavier
+# discounting it biased the policy toward finishing fast (high notch, high energy);
+# a potential-based variant removed that bias but corrupted the logged/selection
+# reward via its (1-γ)·Φ accumulation over the long episode.
 
 # Normalisation denominators for _state_to_obs
-_SPEED_MAX     = 20.0   # ER9E max ≈ 19.4 m/s (links speed limit)
+_SPEED_MAX     = 22.22  # route speed-limit max in m/s (80 km/h)
 _GRADE_MAX     = 0.7    # route max ±0.628%
 _ENERGY_MAX    = 0.25   # per-step energy cap in kWh (observed max ~0.2, headroom to 0.25)
-_MAXSPEED_MAX  = 19.4   # ER9E route speed-limit max in m/s (70 km/h)
+_MAXSPEED_MAX  = 22.22  # route speed-limit max in m/s (80 km/h)
 
 _LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs")
 
@@ -140,34 +163,33 @@ class NeTrainSimEnv(gym.Env):
         max_speed = float(state["link_max_speed_mps"])
         position_m = float(state["position_m"])
 
-        # Per-step progress reward: each meter forward earns a small bonus.
-        # Summed over a complete trip this equals PROGRESS_BONUS, so completion
-        # is always more rewarding than stopping (no "give up and idle" hack).
-        delta_pos_m = max(0.0, position_m - self._last_position_m)
-        self._last_position_m = position_m
-        progress_reward = PROGRESS_BONUS * (delta_pos_m / TOTAL_ROUTE_LENGTH_M)
-
-        # Penalty for going slower than the speed limit — forces the agent to
-        # adapt notch to terrain and speed-limit zone (otherwise notch collapses
-        # to a constant minimum value).
-        speed_deficit = max(0.0, max_speed - speed_mps)
-        speed_deficit_penalty = SPEED_DEFICIT_COEF * speed_deficit
-        # Existing over-speed penalty (kept).
-        speed_over_penalty = 0.1 * max(0.0, speed_mps - max_speed)
-
-        reward = (
-            -step_energy_kwh
-            - speed_over_penalty
-            - speed_deficit_penalty
-            + progress_reward
-        )
-
+        # Episode boundaries.
         terminated = bool(state["terminated"]) or position_m >= TOTAL_ROUTE_LENGTH_M
         truncated = self._step_count >= MAX_STEPS and not terminated
+        self._last_position_m = position_m
+
+        # Per-step pace penalty: penalize lagging the constant pace needed to reach
+        # the terminus by DEADLINE_STEPS. Zero when on/ahead of schedule, so the
+        # agent coasts freely to save energy where it has slack — but crawling (which
+        # falls behind the pace) is penalized immediately, not just at the terminus
+        # (a terminal-only penalty was ignored: the greedy policy crawled to 820 kWh
+        # but 10,700 steps because per-step energy reward dominated its mode).
+        target_pos_m = (self._step_count / DEADLINE_STEPS) * TOTAL_ROUTE_LENGTH_M
+        behind_frac  = max(0.0, target_pos_m - position_m) / TOTAL_ROUTE_LENGTH_M
+        pace_penalty = W_PACE * behind_frac
+
+        # Over-speed penalty: safety net only. The simulator physically caps
+        # speed at the link limit, so this rarely fires.
+        speed_over_penalty = W_OVERSPEED * max(0.0, speed_mps - max_speed)
+
+        reward = (
+            -W_ENERGY * step_energy_kwh
+            - pace_penalty
+            - speed_over_penalty
+        )
 
         if terminated:
-            time_penalty = TIME_COST_PER_STEP * max(0.0, float(self._step_count - TARGET_STEPS))
-            reward += ARRIVAL_BONUS - time_penalty
+            reward += ARRIVAL_BONUS
         elif truncated:
             reward -= TIMEOUT_PENALTY
 
@@ -223,8 +245,11 @@ class NeTrainSimEnv(gym.Env):
 
     def _start_interactive_simulator(self) -> None:
         os.makedirs(_LOGS_DIR, exist_ok=True)
-        stderr_path = os.path.join(_LOGS_DIR, "netrainsim_stderr.log")
-        self._stderr_log = open(stderr_path, "a")
+        # One log file per worker process (8 parallel envs would otherwise clobber
+        # a shared file), truncated each reset so it holds only the current
+        # episode's stderr instead of growing unbounded across runs.
+        stderr_path = os.path.join(_LOGS_DIR, f"netrainsim_stderr_{os.getpid()}.log")
+        self._stderr_log = open(stderr_path, "w")
         self._proc = subprocess.Popen(
             [SIMULATOR_BIN,
              "-n", NODES_FILE,
@@ -257,14 +282,14 @@ class NeTrainSimEnv(gym.Env):
                 rc = self._proc.poll()
                 raise RuntimeError(
                     f"Simulator stalled: no output for {_READLINE_TIMEOUT}s "
-                    f"(returncode={rc}). Check logs/netrainsim_stderr.log"
+                    f"(returncode={rc}). Check logs/netrainsim_stderr_<pid>.log"
                 )
             line = self._proc.stdout.readline()
             if line == "":
                 rc = self._proc.poll()
                 raise RuntimeError(
                     f"Simulator terminated before returning state "
-                    f"(returncode={rc}). Check logs/netrainsim_stderr.log"
+                    f"(returncode={rc}). Check logs/netrainsim_stderr_<pid>.log"
                 )
             line = line.strip()
             if not line.startswith(STATE_PREFIX):

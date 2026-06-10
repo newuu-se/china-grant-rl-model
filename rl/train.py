@@ -4,8 +4,12 @@ PPO training on NeTrainSimEnv using Tianshou 0.5.1.
 Improvements over REINFORCE:
   - PPO clips policy updates (stable learning, no entropy collapse)
   - Critic (value network) reduces gradient variance vs pure REINFORCE
-  - ent_coef=0.01 keeps exploration alive throughout training
-  - repeat_per_collect=4 reuses each batch of episodes 4× (more efficient)
+  - ent_coef keeps exploration alive throughout training (see ENT_COEF)
+  - repeat_per_collect reuses each batch of episodes (more efficient)
+
+Reward (defined in train_env.py): minimize trip energy subject to a schedule
+deadline — uniform per-step time cost trades off against energy, no speed-limit
+target. discount=0.999 so the deadline/arrival signals reach the early steps.
 
 Run:
     source venv/bin/activate
@@ -25,7 +29,7 @@ from tianshou.utils.net.common import Net
 from tianshou.utils.net.discrete import Actor, Critic
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from rl.train_env import NeTrainSimEnv
+from rl.train_env import NeTrainSimEnv, ARRIVAL_BONUS, DEADLINE_STEPS
 
 # CPU is faster: network is tiny and inference runs one step at a time,
 # so GPU kernel-launch overhead exceeds any compute gain.
@@ -36,14 +40,34 @@ NUM_TEST_ENVS  = 1
 
 HIDDEN_SIZES = [256, 128, 64]
 LR           = 3e-4
-DISCOUNT     = 0.99    # was 0.999 — shorter effective horizon (~100 steps), keeps advantages from collapsing
-MAX_EPOCH    = 300
+DISCOUNT     = 0.9999  # episodes are ~6k steps (1 step = 1 s); this is a near-undiscounted
+                       # min-energy-to-goal problem. At 0.99 terminal signals vanished; at 0.999
+                       # the discounting still distorted the long energy SUM and biased toward
+                       # finishing sooner (= high notch, high energy — a run plateaued at ~965 kWh).
+                       # 0.9999 (effective horizon ~10k > episode) keeps the energy objective
+                       # ~undistorted and the arrival/timeout terminal signals visible.
+ENT_COEF     = 0.008   # exploration; bumped 0.005→0.008 to reach the eco (coasting) basin —
+                       # safe now that REWARD_NORM=True stabilizes the large-return value fn
+MAX_EPOCH    = 100     # stable now (reward-norm); 100 epochs to let the pace-penalty policy
+                       # converge to a clean on-schedule eco operating point
 
 EPISODES_PER_COLLECT = NUM_TRAIN_ENVS   # 8 parallel episodes before each update
 EPISODES_PER_TEST    = 1
 REPEAT_PER_COLLECT   = 4                # PPO reuses each collected batch 4×
 BATCH_SIZE           = 2048
 STEP_PER_EPOCH       = 7_000
+
+# PPO / network architecture — single source of truth, also imported by evaluate.py
+# so the eval-time policy can never drift from the trained one.
+OBS_SHAPE     = (7,)
+N_ACTIONS     = 9
+EPS_CLIP      = 0.2     # clip ratio — prevents large destructive updates
+VF_COEF       = 0.5     # value-loss weight
+GAE_LAMBDA    = 0.95    # GAE smoothing for advantage estimates
+MAX_GRAD_NORM = 0.5
+ADV_NORM      = True    # advantage normalization
+REWARD_NORM   = True    # ON — at γ=0.9999 returns are large (~-1000) sums; normalizing the
+                        # returns stabilizes the value fn (the prior run diverged with it off)
 
 CHECKPOINT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "checkpoints")
 
@@ -80,6 +104,32 @@ def save_best_fn(pol) -> None:
     print(f"  → new best saved: {best_path}", flush=True)
 
 
+def build_policy(device: str = DEVICE):
+    """Construct the PPO policy (and its actor/critic/optim) from the shared
+    hyperparameters above. Used by both training and evaluation so the two can
+    never diverge. Returns (policy, actor, critic, optim)."""
+    net_actor  = Net(state_shape=OBS_SHAPE, hidden_sizes=HIDDEN_SIZES, device=device)
+    net_critic = Net(state_shape=OBS_SHAPE, hidden_sizes=HIDDEN_SIZES, device=device)
+    actor  = Actor(net_actor,  action_shape=N_ACTIONS, softmax_output=True, device=device).to(device)
+    critic = Critic(net_critic, device=device).to(device)
+    optim  = torch.optim.Adam(list(actor.parameters()) + list(critic.parameters()), lr=LR)
+    policy = PPOPolicy(
+        actor=actor,
+        critic=critic,
+        optim=optim,
+        dist_fn=torch.distributions.Categorical,
+        discount_factor=DISCOUNT,
+        eps_clip=EPS_CLIP,
+        advantage_normalization=ADV_NORM,
+        vf_coef=VF_COEF,
+        ent_coef=ENT_COEF,
+        gae_lambda=GAE_LAMBDA,
+        reward_normalization=REWARD_NORM,
+        max_grad_norm=MAX_GRAD_NORM,
+    )
+    return policy, actor, critic, optim
+
+
 def main():
     global policy
 
@@ -89,50 +139,15 @@ def main():
     print(f"  Device       : {DEVICE}")
     print(f"  Train envs   : {NUM_TRAIN_ENVS} parallel C++ simulators")
     print(f"  Epochs       : {MAX_EPOCH}  (checkpoint every 10)")
-    print(f"  Algorithm    : PPO  (eps_clip=0.2, ent_coef=0.01, repeat=4×)")
-    print(f"  Reward       : -energy/step  -speed_penalty  -time_penalty  +100 arrival")
+    print(f"  Algorithm    : PPO  (eps_clip=0.2, ent_coef={ENT_COEF}, discount={DISCOUNT}, repeat={REPEAT_PER_COLLECT}×)")
+    print(f"  Reward       : -energy/step  -time/step  -overspeed  +progress  +{ARRIVAL_BONUS:.0f} arrival (deadline {DEADLINE_STEPS} steps)")
     print("━" * 65 + "\n")
 
     train_envs = SubprocVectorEnv([make_env] * NUM_TRAIN_ENVS)
     test_envs  = SubprocVectorEnv([make_env] * NUM_TEST_ENVS)
 
-    obs_shape = (7,)
-    n_actions = 9
-
-    # Separate networks for actor and critic — PPO needs a value estimate
-    net_actor  = Net(state_shape=obs_shape, hidden_sizes=HIDDEN_SIZES, device=DEVICE)
-    net_critic = Net(state_shape=obs_shape, hidden_sizes=HIDDEN_SIZES, device=DEVICE)
-
-    actor = Actor(
-        preprocess_net=net_actor,
-        action_shape=n_actions,
-        softmax_output=True,
-        device=DEVICE,
-    ).to(DEVICE)
-
-    critic = Critic(
-        preprocess_net=net_critic,
-        device=DEVICE,
-    ).to(DEVICE)
-
-    optim = torch.optim.Adam(
-        list(actor.parameters()) + list(critic.parameters()), lr=LR
-    )
-
-    policy = PPOPolicy(
-        actor=actor,
-        critic=critic,
-        optim=optim,
-        dist_fn=torch.distributions.Categorical,
-        discount_factor=DISCOUNT,
-        eps_clip=0.2,               # clip ratio — prevents large destructive updates
-        advantage_normalization=True,
-        vf_coef=0.5,                # value loss weight
-        ent_coef=0.001,             # was 0.01 — was dominating the gradient and forcing uniform-random policy
-        gae_lambda=0.95,            # GAE smoothing for advantage estimates
-        reward_normalization=False, # was True — was shrinking advantages to ~0 and starving policy gradient
-        max_grad_norm=0.5,
-    )
+    # Actor/critic/optim/policy from the shared factory (see build_policy).
+    policy, actor, critic, optim = build_policy(DEVICE)
 
     buffer = VectorReplayBuffer(
         total_size=8_000 * NUM_TRAIN_ENVS,

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-RL-based train energy optimization: a Tianshou REINFORCE agent controls locomotive throttle
+RL-based train energy optimization: a Tianshou PPO agent controls locomotive throttle
 (notch 0–8) each second to minimize total energy consumption over a full A→B trip while
 respecting speed limits and arriving within the scheduled time window.
 
@@ -230,17 +230,25 @@ The RL env tracks `_cum_energy_kwh` in Python by summing per-step values.
 
 **Action space:** `Discrete(9)` — notch 0–8 (maps to locomotive `currentLocNotch`).
 
-**Reward (per step):**
+**Reward (per step)** — defined in `rl/train_env.py`; objective is *minimize trip energy
+subject to a schedule deadline*:
 ```
-r = -delta_energy_kwh
-  - 0.1 * max(0, speed_mps - link_max_speed_mps)   # speed limit penalty
-  + 100.0 on terminated=True (train arrived)         # arrival bonus
-  - 50.0  on truncated=True  (trajectory ended early) # timeout penalty
+r = -W_ENERGY * energy_kwh                           # energy this step          (W_ENERGY=1.0)
+  - W_TIME                                            # uniform per-step time cost (0.05)
+  - W_OVERSPEED * max(0, speed - link_limit)          # speed cap; rarely fires    (1.0)
+  + PROGRESS_BONUS * delta_pos_m / route_len          # path-invariant completion  (1500 total)
+  + ARRIVAL_BONUS - W_LATE*max(0, steps-DEADLINE)  on terminated   (200; deadline 6500 steps)
+  - TIMEOUT_PENALTY                                 on truncated    (1500)
 ```
+There is deliberately **no speed-deficit penalty**: the uniform time cost (not a speed target)
+creates the energy-vs-time trade-off that lets the agent coast where the schedule has slack.
+W_TIME is calibrated from the constant-notch energy curve (see Key Data Facts) so the eco-optimum
+sits near constant notch 3; the agent should beat that by varying notch with grade/speed zone.
 
 **Episode boundaries:**
-- `terminated=True`: `position_m >= TOTAL_ROUTE_LENGTH_M` (74,869.6 m)
-- `truncated=True`: trajectory CSV exhausted without reaching destination
+- `terminated=True`: simulator reports the train reached its destination, or
+  `position_m >= TOTAL_ROUTE_LENGTH_M` (74,891.29 m)
+- `truncated=True`: `_step_count >= MAX_STEPS` (12,000) without arriving
 
 ### Tianshou REINFORCE (`rl/train.py`) — tianshou 0.5.1 API
 
@@ -301,10 +309,16 @@ pre-populate `train->optimumThrottleLevels` queue (the built-in optimizer's path
 
 ## Key Data Facts
 
-- Route: 74.87 km, 750 nodes, 749 links, ~100 m per segment
-- Locomotive max speed: 14.8645 m/s (≈53.5 km/h)
-- Speed limits: 1.0, 3.0, 11.1, 16.6, 19.4, 22.2 m/s (3.6, 10.8, 40, 60, 70, 80 km/h)
-- Episode length at 11.1 m/s average: ~6,744 simulator steps (1 step = 1 second)
+- Route: 74.89 km (Toshkent → Ho'jakent line), 1500 nodes, 1499 links, ~50 m per segment.
+  Active input files: `data/netrainsim_v2/{nodesFile_v2_fixed, linksFile_v2_fixed_speed, trainsFile_rl}.dat`
+- Train: ER9E electric multiple unit (replaced the original diesel demo loco)
+- Speed limits (linksFile_v2_fixed_speed.dat): 11.11, 16.67, 19.44, 22.22 m/s (40, 60, 70, 80 km/h).
+  Distance per zone: 31.0 km @ 40, 15.6 km @ 60, 4.0 km @ 70, 24.3 km @ 80.
+- Trip-time bounds: theoretical floor ≈ 5,025 s (speed-limit-bound); fastest feasible ≈ 5,600 s
+  (constant notch 8); RL schedule deadline = 6,500 s (1 step = 1 second)
+- Constant-notch energy/time (measured via interactive sim): n8≈5,600 s/987 kWh, n6≈5,653 s/981,
+  n4≈5,936 s/936, n3≈6,446 s/868, n2≈7,897 s/820 — lower notch = less energy, more time
+- The simulator hard-caps speed at each link's freeFlowSpeed, so over-speeding is rare
 - NeTrainSim speed unit in .dat files: **m/s** (confirmed in netlink.cpp)
 - NeTrainSim .dat files: ASCII text, tab-separated, NOT binary
 

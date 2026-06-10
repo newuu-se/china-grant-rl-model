@@ -19,18 +19,13 @@ import sys
 
 import torch
 import numpy as np
-from tianshou.utils.net.common import Net
-from tianshou.utils.net.discrete import Actor, Critic
 from tianshou.policy import PPOPolicy
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from rl.train_env import NeTrainSimEnv, TOTAL_ROUTE_LENGTH_M, NODES_FILE, LINKS_FILE
-
-DEVICE       = "cpu"
-HIDDEN_SIZES = [256, 128, 64]
-N_ACTIONS    = 9
-OBS_SHAPE    = (7,)
-DISCOUNT     = 0.999
+from rl.train_env import NeTrainSimEnv, NODES_FILE, LINKS_FILE
+# Reuse training's policy factory + device so the eval policy can never drift
+# from the trained one (same architecture and hyperparameters).
+from rl.train import build_policy as build_ppo_policy, DEVICE
 
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "results")
 CHECKPOINT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "checkpoints")
@@ -90,25 +85,7 @@ def find_latest_checkpoint() -> str:
 
 
 def build_policy(checkpoint_path: str) -> PPOPolicy:
-    net_actor  = Net(state_shape=OBS_SHAPE, hidden_sizes=HIDDEN_SIZES, device=DEVICE)
-    net_critic = Net(state_shape=OBS_SHAPE, hidden_sizes=HIDDEN_SIZES, device=DEVICE)
-    actor  = Actor(net_actor,  action_shape=N_ACTIONS, softmax_output=True, device=DEVICE).to(DEVICE)
-    critic = Critic(net_critic, device=DEVICE).to(DEVICE)
-    optim  = torch.optim.Adam(list(actor.parameters()) + list(critic.parameters()))
-    policy = PPOPolicy(
-        actor=actor,
-        critic=critic,
-        optim=optim,
-        dist_fn=torch.distributions.Categorical,
-        discount_factor=DISCOUNT,
-        eps_clip=0.2,
-        advantage_normalization=True,
-        vf_coef=0.5,
-        ent_coef=0.01,
-        gae_lambda=0.95,
-        reward_normalization=True,
-        max_grad_norm=0.5,
-    )
+    policy, _actor, _critic, _optim = build_ppo_policy(DEVICE)
     state_dict = torch.load(checkpoint_path, map_location=DEVICE)
     policy.load_state_dict(state_dict)
     policy.eval()

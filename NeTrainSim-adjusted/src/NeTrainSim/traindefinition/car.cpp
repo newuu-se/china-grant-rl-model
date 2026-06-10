@@ -100,18 +100,30 @@ double Car::getCargoNetWeight() {
 }
 
 double Car::getResistance(double trainSpeed) {
-	// these calculations depend of US units, so these are the conversions factors from meteric system
-    // They are listed this way and not converted outside for a better tracing/changing
+    // GOST/Uzbekistan resistance formula (fully SI-based, no US unit conversions)
+    // currentWeight: metric tonnes | trainSpeed: m/s
 
+    double v    = trainSpeed * 3.6;           // m/s → km/h
+    double W_kN = this->currentWeight * 9.81; // tonnes → kN
 
-    double rVal; // resistance value placeholder definition
-    trainSpeed *= 2.23694;  // convert m/s to mph
-	rVal = 1.5 + 18 / ((this->currentWeight * 1.10231) / this->noOfAxiles) + 0.03 * trainSpeed
-		+ (this->frontalArea * 10.7639) * this->dragCoef * (pow(trainSpeed, 2)) / (this->currentWeight * 1.10231);
-	rVal = (rVal) * ((this->currentWeight * 1.10231)) + 20 * (this->currentWeight * 1.10231) * (this->trackGrade);
-	rVal += abs(this->trackCurvature) * 20 * 0.04 * (this->currentWeight * 1.10231);
-    rVal *= (4.44822); // convert to N
-	return rVal;
+    // Basic specific resistance (N/kN): w0 = a + b·v + c·v²
+    // Coefficients for Uzbekistan railway conditions (GOST-based):
+    //   a = 1.1 N/kN  (constant bearing/rolling resistance)
+    //   b = 0.01      (speed-linear term)
+    //   c = 0.000227  (aerodynamic/speed-squared term)
+    double w0 = 1.1 + 0.01 * v + 0.000227 * v * v;
+
+    // Basic rolling resistance [N]
+    double rVal = w0 * W_kN;
+
+    // Grade resistance: trackGrade stored in % → convert to ‰ (* 10) [N]
+    rVal += this->trackGrade * 10.0 * W_kN;
+
+    // Curve resistance: GOST w_r = 700/R [N/kN], curvature in US degrees of arc
+    // Radius: R [m] = 1746.4 / curvature_degrees
+    rVal += std::abs(this->trackCurvature) * (700.0 / 1746.4) * W_kN;
+
+    return rVal;
 }
 
 double Car::getEnergyConsumption(double &timeStep) {

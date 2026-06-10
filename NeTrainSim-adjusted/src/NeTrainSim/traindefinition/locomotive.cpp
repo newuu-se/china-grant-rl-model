@@ -418,36 +418,17 @@ double Locomotive::getRegenerativeEffeciency(
                          double& trainAcceleration,
                          double &trainSpeed)
 {
-    // if it is a regenerative locomotive, regenerate energy
-    if (TrainTypes::locomotiveRechargableTechnologies.exist(this->powerType)) {
-        // get regenerative eff
-        double regenerativeEff = 0;
-        //if there is an deceleration value, calculate the eff directly
-        if (trainAcceleration != 0) {
-            regenerativeEff = (1 / (exp(EC::gamma/ abs(trainAcceleration))));
-        }
-        //if the deceleration is zero, we cannot divide by zero
-        else {
-            //Calculate virtual acceleration
-            double virtualAcceleration = LocomotiveVirtualTractivePower /
-                                         (trainSpeed * this->currentWeight);
-            // calculate regenerative eff
-            //if virtual deceleration is not zero, calculate eff
-            // from virtual deceleration
-            if (virtualAcceleration != 0) {
-                regenerativeEff = 1 / (exp(EC::gamma /
-                                           abs(virtualAcceleration)));
-            }
-            else {
-                regenerativeEff = 0.0;
-            }
-        }
-        return regenerativeEff;
-    }
-    // if it is diesel-electric, do no regenerate electricity
-    else {
-        return 0.0;
-    }
+    // Regenerative braking removed (project requirement): the locomotive recovers
+    // NO energy during braking/deceleration for any power type, so braking is
+    // purely dissipative. Returning 0 efficiency makes the negative (braking)
+    // tractive-power term contribute 0 in getEnergyConsumption /
+    // getEnergyConsumptionAtDCBus, so only auxiliary power is drawn while braking.
+    // (Previously: rechargeable types returned 1/exp(gamma/|accel|); see git
+    // history to restore.)
+    (void)LocomotiveVirtualTractivePower;
+    (void)trainAcceleration;
+    (void)trainSpeed;
+    return 0.0;
 }
 
 double Locomotive::getEnergyConsumptionAtDCBus(
@@ -853,20 +834,29 @@ std::pair<bool, double> Locomotive::consumeFuel(
 
 double Locomotive::getResistance(double trainSpeed)
 {
-    // these calculations depend of US units, so these are the
-    // conversions factors from meteric system
-    double rVal = 0.0;
-    double speed = trainSpeed * 2.23694;
-    rVal = 1.5 + 18 / ((this->currentWeight * 1.10231) /
-                this->noOfAxiles) + 0.03 * speed
-        + (this->frontalArea * 10.7639) * this->dragCoef * (pow(speed, 2)) /
-                 (this->currentWeight * 1.10231);
-    rVal = (rVal) *
-               ((this->currentWeight * 1.10231)) + 20 *
-               (this->currentWeight * 1.10231) * (this->trackGrade);
-    rVal += abs(this->trackCurvature) * 20 * 0.04 *
-               (this->currentWeight * 1.10231);
-    rVal *= (4.44822);
+    // GOST/Uzbekistan resistance formula (fully SI-based, no US unit conversions)
+    // currentWeight: metric tonnes | trainSpeed: m/s
+
+    double v    = trainSpeed * 3.6;           // m/s → km/h
+    double W_kN = this->currentWeight * 9.81; // tonnes → kN
+
+    // Basic specific resistance (N/kN): w0 = a + b·v + c·v²
+    // Coefficients for Uzbekistan railway conditions (GOST-based):
+    //   a = 1.1 N/kN  (constant bearing/rolling resistance)
+    //   b = 0.01      (speed-linear term)
+    //   c = 0.000227  (aerodynamic/speed-squared term)
+    double w0 = 1.1 + 0.01 * v + 0.000227 * v * v;
+
+    // Basic rolling resistance [N]
+    double rVal = w0 * W_kN;
+
+    // Grade resistance: trackGrade stored in % → convert to ‰ (* 10) [N]
+    rVal += this->trackGrade * 10.0 * W_kN;
+
+    // Curve resistance: GOST w_r = 700/R [N/kN], curvature in US degrees of arc
+    // Radius: R [m] = 1746.4 / curvature_degrees
+    rVal += std::abs(this->trackCurvature) * (700.0 / 1746.4) * W_kN;
+
     return rVal;
 }
 
