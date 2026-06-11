@@ -101,7 +101,6 @@ def run_episode(policy: PPOPolicy, output_path: str, stochastic: bool = False) -
 
     rows = []
     step = 0
-    cum_energy = 0.0
     terminated = False
     truncated  = False
 
@@ -123,11 +122,12 @@ def run_episode(policy: PPOPolicy, output_path: str, stochastic: bool = False) -
 
         obs, reward, terminated, truncated, _ = env.step(notch)
 
+        # NOTE: under action repeat (CONTROL_INTERVAL=15) state is the LAST sim
+        # second of the decision; per-step sums must come from the env, which
+        # accumulates every simulator second (env._cum_energy_kwh).
         state = env._last_state
-        position_m      = float(state["position_m"])
-        speed_mps       = float(state["speed_mps"])
-        step_energy_kwh = float(state["energy_kwh"])
-        cum_energy     += step_energy_kwh
+        position_m = float(state["position_m"])
+        speed_mps  = float(state["speed_mps"])
 
         # Interpolate (x, y) at the train's current position along the path
         x_m = float(np.interp(position_m, cum_pos, xs))

@@ -7,17 +7,24 @@ Phase 2 (interactive):
   step(action) sends {"notch": N} to simulator stdin and reads the next state
   JSON from stdout (prefixed by "NTS_JSON ").
 
-Observation space (7 floats):
+Observation space (9 floats):
   [speed_mps, position_m, grade_perc, curvature_perc,
-   remaining_dist_m, energy_kwh, link_max_speed_mps]
+   remaining_dist_m, energy_kwh, link_max_speed_mps,
+   time_frac, behind_frac]
+
+The last two make the schedule visible: the pace-penalty reward depends on the
+step counter, so without a time feature the reward would be a function of
+state the agent cannot observe (non-Markov) — the value function could never
+predict the pace cost and the policy could never modulate with schedule slack.
 
 Action space: Discrete(9) — notch 0-8 (maps to locomotive currentLocNotch)
 """
 
 import json
 import os
-import select
+import queue
 import subprocess
+import threading
 import time
 
 import gymnasium as gym
@@ -33,15 +40,19 @@ SIMULATOR_BIN = os.path.join(
     "src", "NeTrainSimConsole", "NeTrainSim"
 )
 NODES_FILE  = os.path.join(_REPO, "data", "netrainsim_v2", "nodesFile_v2_fixed.dat")
-LINKS_FILE  = os.path.join(_REPO, "data", "netrainsim_v2", "linksFile_v2_fixed_speed.dat")
+# linksFile_v2_clean.dat = linksFile_v2_fixed_speed.dat with DEM elevation-noise
+# grade spikes removed (was ±17% on 50 m segments → physics-breaking resistance
+# and 3.76 kWh/s energy spikes). Regenerate with: python data/clean_grade_spikes.py
+LINKS_FILE  = os.path.join(_REPO, "data", "netrainsim_v2", "linksFile_v2_clean.dat")
 TRAINS_FILE = os.path.join(_REPO, "data", "netrainsim_v2", "trainsFile_rl.dat")
 
 TOTAL_ROUTE_LENGTH_M = 74_891.29  # sum of all 1499 link lengths (linksFile_v2_fixed_speed.dat)
 STATE_PREFIX = "NTS_JSON "
-MAX_STEPS      = 12_000  # hard ceiling; slowest sensible trip (constant notch 2) is ~7,900 steps
+MAX_STEPS      = 12_000  # hard ceiling; slowest sensible trip (constant notch 2) is ~8,500 steps
 DEADLINE_STEPS = 6_500   # schedule deadline (s). Physical floor ≈ 5,025 s (speed-limit-bound);
-                         # fastest feasible ≈ 5,600 s (notch 8); eco-optimal constant notch 3 ≈
-                         # 6,446 s. 6,500 leaves room to coast for energy while staying on schedule.
+                         # fastest feasible ≈ 5,602 s (notch 8); eco-optimal constant notch 3 ≈
+                         # 6,442 s. 6,500 leaves room to coast for energy while staying on schedule.
+                         # (Times measured on linksFile_v2_clean.dat — rl/run_baselines.py.)
 CONTROL_INTERVAL = 15    # action repeat: hold each chosen notch this many simulator seconds, so the
                          # agent makes ~470 decisions per trip instead of ~7,000. Shortening the
                          # decision horizon ~15x makes the long-horizon credit assignment tractable —
@@ -63,8 +74,9 @@ CONTROL_INTERVAL = 15    # action repeat: hold each chosen notch this many simul
 # behind_fraction = max(0, step/DEADLINE_STEPS*route_len - position) / route_len, so
 # the penalty is ZERO when on/ahead of schedule — the agent coasts freely where it
 # has slack and is pushed to keep pace only when lagging. Constant-notch curve
-# (current physics): n8=912 kWh/5603 s, n4=882/5888, n3=834/6337, n2=784/7706; the
-# slowest ON-schedule (≤6500 steps) trajectory ≈ notch 3, so ~834 kWh is the eco target.
+# (clean data, rl/run_baselines.py 2026-06-11): n8=862 kWh/5602 s, n6=853/5652,
+# n5=849/5721, n4=834/5910, n3=789/6442, n2=758/8492; the slowest ON-schedule
+# (≤6500 steps) trajectory ≈ notch 3, so ~789 kWh is the eco target.
 W_ENERGY        = 3.0      # per kWh — amplified so the fast→eco energy gap is a strong,
                            # learnable gradient (at W_ENERGY=1 the eco gain was only ~5% of reward)
 W_PACE          = 2.0      # per-step penalty per (fraction-of-route) BEHIND the deadline pace;
@@ -89,9 +101,15 @@ TIMEOUT_PENALTY = 1500.0   # large enough that giving up is never the best optio
 
 # Normalisation denominators for _state_to_obs
 _SPEED_MAX     = 22.22  # route speed-limit max in m/s (80 km/h)
-_GRADE_MAX     = 0.7    # route max ±0.628%
-_ENERGY_MAX    = 0.25   # per-step energy cap in kWh (observed max ~0.2, headroom to 0.25)
+_GRADE_MAX     = 4.5    # cleaned route grade range is [-2.7, +4.5] % (linksFile_v2_clean.dat).
+                        # WAS 0.7 (stale v1 value) — with v2 grades up to ±17% raw / ±4.5% clean,
+                        # that clipped ~27% of the route to ±1 = sign-only grade info, blinding
+                        # the agent to exactly the terrain magnitude it must modulate against.
+_ENERGY_MAX    = 1.5    # per-step energy cap in kWh. Measured max on clean data = 1.393 kWh/s
+                        # (constant notch 8, acceleration transient; steady full power ≈ 1.1).
+                        # WAS 0.25 (stale) — clipped any heavy power draw to the same obs value.
 _MAXSPEED_MAX  = 22.22  # route speed-limit max in m/s (80 km/h)
+_TIME_MAX      = 2.0    # time_frac cap: MAX_STEPS/DEADLINE_STEPS = 1.85 < 2.0
 
 _LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs")
 
@@ -99,16 +117,21 @@ _LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs
 class NeTrainSimEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    # All 7 features are normalized to roughly [-1, 1] or [0, 1] by _state_to_obs.
+    # All 9 features are normalized to roughly [-1, 1] or [0, 1] by _state_to_obs.
+    # [speed, position, grade, curvature, remaining, energy, link_max_speed,
+    #  time_frac, behind_frac]
     observation_space = Box(
-        low =np.array([0.0, 0.0, -1.0, -1.0, 0.0, 0.0, 0.0], dtype=np.float32),
-        high=np.array([2.0, 1.0,  1.0,  1.0, 1.0, 1.0, 2.0], dtype=np.float32),
+        low =np.array([0.0, 0.0, -1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                      dtype=np.float32),
+        high=np.array([2.0, 1.0,  1.0,  1.0, 1.0, 1.0, 2.0, 2.0, 1.0],
+                      dtype=np.float32),
     )
     action_space = Discrete(9)  # notch 0-8
 
     def __init__(self):
         super().__init__()
         self._proc: subprocess.Popen | None = None
+        self._out_queue: queue.Queue | None = None  # lines from the reader thread
         self._stderr_log = None   # file handle for simulator stderr
         self._last_state: dict | None = None
         self._cum_energy_kwh: float = 0.0   # running total for logging/reward only
@@ -124,11 +147,14 @@ class NeTrainSimEnv(gym.Env):
                 f"Simulator binary not found: {SIMULATOR_BIN}\n"
                 "Run: cd NeTrainSim-adjusted && ./build-linux.sh  (or build-mac.sh on macOS)"
             )
-        if not os.path.isfile(NODES_FILE):
-            raise FileNotFoundError(
-                f"NeTrainSim input files not found in data/netrainsim/.\n"
-                "Run: python data/generate_netrainsim_input.py"
-            )
+        for path in (NODES_FILE, LINKS_FILE, TRAINS_FILE):
+            if not os.path.isfile(path):
+                raise FileNotFoundError(
+                    f"NeTrainSim input file not found: {path}\n"
+                    "The v2 files are checked in under data/netrainsim_v2/; "
+                    "linksFile_v2_clean.dat is regenerated by "
+                    "data/clean_grade_spikes.py"
+                )
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -236,10 +262,6 @@ class NeTrainSimEnv(gym.Env):
             )
         return reward, terminated, truncated, step_energy_kwh
 
-        # Return empty info dict — tianshou 0.5.1 Batch cannot create new keys
-        # via index assignment, so any non-empty info dict causes a ValueError.
-        return obs, float(reward), terminated, truncated, {}
-
     def close(self):
         if self._proc is None:
             return
@@ -290,9 +312,29 @@ class NeTrainSimEnv(gym.Env):
             text=True,
             bufsize=1,
         )
+        # Dedicated reader thread → queue. A select()-on-fd + buffered readline()
+        # combo can deadlock: one OS read may pull several lines into Python's
+        # buffer, then the next select() blocks on an empty fd while the wanted
+        # line sits in the buffer, and the 30 s watchdog kills a healthy episode.
+        # The thread does blocking readlines (immune to that race); EOF → None.
+        self._out_queue = queue.Queue()
+        threading.Thread(
+            target=self._drain_stdout,
+            args=(self._proc, self._out_queue),
+            daemon=True,
+        ).start()
+
+    @staticmethod
+    def _drain_stdout(proc: subprocess.Popen, out_queue: queue.Queue) -> None:
+        try:
+            for line in proc.stdout:
+                out_queue.put(line)
+        except (ValueError, OSError):
+            pass  # stream closed during shutdown
+        out_queue.put(None)  # EOF sentinel
 
     def _send_action_and_read_state(self, notch: int) -> dict:
-        if self._proc is None or self._proc.stdin is None or self._proc.stdout is None:
+        if self._proc is None or self._proc.stdin is None or self._out_queue is None:
             raise RuntimeError("Interactive simulator process is not running.")
 
         payload = json.dumps({"notch": int(notch)})
@@ -302,17 +344,17 @@ class NeTrainSimEnv(gym.Env):
         except BrokenPipeError as exc:
             raise RuntimeError("Simulator stdin pipe is closed.") from exc
 
-        _READLINE_TIMEOUT = 30.0
+        _READ_TIMEOUT = 30.0
         while True:
-            ready, _, _ = select.select([self._proc.stdout], [], [], _READLINE_TIMEOUT)
-            if not ready:
+            try:
+                line = self._out_queue.get(timeout=_READ_TIMEOUT)
+            except queue.Empty:
                 rc = self._proc.poll()
                 raise RuntimeError(
-                    f"Simulator stalled: no output for {_READLINE_TIMEOUT}s "
+                    f"Simulator stalled: no output for {_READ_TIMEOUT}s "
                     f"(returncode={rc}). Check logs/netrainsim_stderr_<pid>.log"
-                )
-            line = self._proc.stdout.readline()
-            if line == "":
+                ) from None
+            if line is None:
                 rc = self._proc.poll()
                 raise RuntimeError(
                     f"Simulator terminated before returning state "
@@ -331,6 +373,14 @@ class NeTrainSimEnv(gym.Env):
     def _state_to_obs(self, state: dict, step_energy_kwh: float) -> np.ndarray:
         position = float(state["position_m"])
         remaining = max(0.0, TOTAL_ROUTE_LENGTH_M - position)
+        # Schedule features — the pace penalty is a function of the step counter,
+        # so the agent must SEE the clock or the reward is non-Markov in its obs:
+        # time_frac   = elapsed time as a fraction of the deadline
+        # behind_frac = how far (fraction of route) the train lags the deadline
+        #               pace; exactly the quantity the pace penalty charges.
+        time_frac   = self._step_count / DEADLINE_STEPS
+        target_pos  = time_frac * TOTAL_ROUTE_LENGTH_M
+        behind_frac = max(0.0, target_pos - position) / TOTAL_ROUTE_LENGTH_M
         obs = np.array([
             float(state["speed_mps"])          / _SPEED_MAX,
             position                           / TOTAL_ROUTE_LENGTH_M,
@@ -339,5 +389,7 @@ class NeTrainSimEnv(gym.Env):
             remaining                          / TOTAL_ROUTE_LENGTH_M,
             step_energy_kwh                    / _ENERGY_MAX,
             float(state["link_max_speed_mps"]) / _MAXSPEED_MAX,
+            min(time_frac, _TIME_MAX),
+            behind_frac,
         ], dtype=np.float32)
         return np.clip(obs, self.observation_space.low, self.observation_space.high)

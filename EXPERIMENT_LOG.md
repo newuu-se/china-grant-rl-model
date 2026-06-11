@@ -93,11 +93,32 @@ each link's free-flow speed, so over-speeding is physically prevented.
 
 ---
 
+### 2.3 Input-data cleaning — DEM grade-spike removal (2026-06-11)
+**File:** `data/clean_grade_spikes.py` → `data/netrainsim_v2/linksFile_v2_clean.dat`
+(now the active links file).
+
+The raw v2 links file contained physically impossible grades — adjacent
+opposite-sign pairs up to **−12.4% / +17.0% on 50 m segments** (links 887/888,
+1204/1205, …), classic single-node DEM elevation noise. Consequences measured
+before cleaning: on a +17% link the grade resistance (~620 kN) exceeded the
+train's total adhesion (~440 kN), force balance broke (reported accel ≈ 0 with
+R ≫ F), and the virtual-power energy accounting `(m·a + R)·v` charged up to
+**3.76 kWh in one second (11.8 MW from a 3.6 MW consist)**.
+
+Method: integrate grades to an elevation profile → 3× median-3 filter +
+1× moving-average on interior nodes (endpoints pinned → net climb 346.6 m
+preserved exactly) → re-derive grades. Grade range after: **−2.7…+4.5%**
+(remaining >3% links are clustered near the mountainous route end, i.e.
+plausible terrain). Max per-step energy after: 1.39 kWh (notch-8 acceleration
+transient) — within installed power.
+
+---
+
 ## 3. RL problem formulation
 
 | Element | Definition |
 |---|---|
-| **Observation** | 7 floats, normalized ≈[0,1]: speed, position, grade, curvature, remaining distance, per-step energy, link speed limit |
+| **Observation** | 9 floats, normalized ≈[0,1]: speed, position, grade, curvature, remaining distance, per-step energy, link speed limit, **time_frac, behind_frac** (schedule features added 2026-06-11 — the pace-penalty reward depends on the step counter, so without them the reward was non-Markov in the observation) |
 | **Action** | `Discrete(9)` — notch 0–8 |
 | **Transition** | persistent interactive NeTrainSim subprocess: send `{notch}` → run one (or several) sim-seconds → read state JSON |
 | **Episode end** | `terminated` = reached terminus; `truncated` = step count ≥ MAX_STEPS (12,000) |
@@ -231,6 +252,54 @@ therefore that the RL agent **reliably identifies the energy-optimal, schedule-f
 throttle setting end-to-end from the simulator**, rather than performing continuous
 eco-modulation. (`W_SMOOTH` is the dial between an erratic profile and a flat one.)
 
+### Iteration 8 — observation/data bug-fix pass (2026-06-11)
+**Motivation:** a full-code review questioned whether the "no terrain modulation"
+ceiling was real or self-inflicted. It found the agent had been **blind to the
+terrain it was supposed to modulate against**:
+1. `_GRADE_MAX=0.7` (stale v1 value) clipped the grade feature to a **sign bit on
+   ~27% of the route** (v2 grades reach ±17% raw / ±4.5% clean).
+2. `_ENERGY_MAX=0.25` vs real per-step max 1.39 kWh — the energy feature clipped
+   on any heavy power draw.
+3. The DEM grade spikes themselves (→ §2.3) distorted physics and energy.
+4. The pace-penalty reward depends on the step counter, which was **not in the
+   observation** (non-Markov reward) — the critic could not predict pace costs,
+   the policy could not modulate with schedule slack. → obs 7→9 (`time_frac`,
+   `behind_frac`).
+5. A `select()`+buffered-`readline()` race in the env could falsely kill healthy
+   episodes after a 30 s stall → reader thread + queue.
+6. Checkpoint labels were one epoch ahead of their contents (tianshou `train_fn`
+   fires at epoch *start*) → saving moved to `test_fn`.
+
+Baselines re-measured on the clean data (→ §7.1): eco target = **const n3
+= 788.6 kWh / 6,442 s** (deadline 6,500 s unchanged).
+
+**Run 1 with all fixes (hyperparams = iteration 7):** stable, 901/901 arrivals,
+best test −2470 (ep 89) — but `loss/ent` sat at **2.190 ≈ ln 9 for all 100
+epochs**: the sampled histogram was flat (29–58 per notch) and the argmax parked
+at **notch 0** (timeout). With a constant `ent_coef`, the entropy gradient
+exceeded the per-decision advantage gradient — the policy never committed.
+
+### Iteration 9 — entropy annealing → sharp policy (2026-06-11)
+**Change:** linear anneal `ent_coef` 0.004 → 0 by epoch 70 (set in `train_fn`
+via `policy._weight_ent`); last 30 epochs train on the pure objective.
+**Result (16.1 min, 901/901 arrivals):** entropy **2.195 → 0.677**; best test
+reward **−2323 (ep 84)** — best of any iteration. After the bonus reached zero,
+test rewards drifted (−2323 → −4604 by ep 100), so `policy_best.pth` (ep 84) is
+the artifact. Evaluation of best:
+- **Sampled:** 6,708 s / **800.2 kWh** — mode notch 2 (287/448 decisions) with
+  notch-1 stretches and notch-6/8 kicks; 3.2% late.
+- **Deterministic argmax:** exactly **constant notch 2** (758.4 kWh / 8,492 s,
+  31% late) — the n2 baseline point.
+
+**Interpretation:** annealing fixed policy sharpness (uniform → committed).
+The remaining gap is **reward calibration, not optimization**: at `W_PACE=2`,
+being ~200 s late costs ≈210 reward ≈ 70 kWh-equivalents, so the n2/n3 boundary
+trajectories (800 kWh, slightly late) score ≈ const-n3 (789 kWh, on-time:
+≈ −2370) — the reward is now *indifferent* between them, and const n3 still
+**Pareto-dominates** the learned policy. To force on-schedule eco operation the
+lateness exchange rate must rise (e.g. `W_PACE` 2→4+) or the deadline must enter
+as a hard constraint.
+
 ---
 
 ## 6. Training methodology (current)
@@ -242,7 +311,7 @@ eco-modulation. (`W_SMOOTH` is the dial between an erratic profile and a flat on
 | Discount γ | 0.9999 | near-undiscounted; appropriate for long episodic min-cost |
 | GAE λ | 0.95 | |
 | Clip ε | 0.2 | |
-| Entropy coef | 0.008 | exploration toward the eco basin |
+| Entropy coef | 0.004 → 0, linear anneal by epoch 70 | constant coef pinned the policy at uniform (iteration 8); anneal lets it commit |
 | Reward norm | True | stabilizes large-magnitude returns |
 | Adv. norm | True | |
 | Parallel envs | 8 (`SubprocVectorEnv`) | one C++ subprocess each |
@@ -253,28 +322,34 @@ eco-modulation. (`W_SMOOTH` is the dial between an erratic profile and a flat on
 
 ## 7. Results
 
-### 7.1 Constant-notch baselines (current physics, measured)
+### 7.1 Constant-notch baselines (clean data, `rl/run_baselines.py`, 2026-06-11)
 The energy–time Pareto frontier, obtained by driving each constant notch to
 completion through the interactive simulator:
 
 | Notch | Trip time (s) | Energy (kWh) | On schedule (≤6,500 s)? |
 |---|---|---|---|
-| 8 | 5,603 | 912.5 | yes |
-| 6 | 5,654 | 909.3 | yes |
-| 5 | 5,716 | 896.9 | yes |
-| 4 | 5,888 | 881.5 | yes |
-| **3** | **6,337** | **834.1** | **yes (eco optimum)** |
-| 2 | 7,706 | 783.5 | no (late) |
+| 8 | 5,602 | 862.4 | yes |
+| 6 | 5,652 | 853.5 | yes |
+| 5 | 5,721 | 849.1 | yes |
+| 4 | 5,910 | 834.4 | yes |
+| **3** | **6,442** | **788.6** | **yes (eco optimum)** |
+| 2 | 8,492 | 758.4 | no (31% late) |
 
-→ **Constant notch 3 (834 kWh, on-time)** is the lowest-energy schedule-feasible
+→ **Constant notch 3 (788.6 kWh, on-time)** is the lowest-energy schedule-feasible
 constant policy and serves as the reference eco target. Theoretical minimum trip
 time (speed-limit-bound) ≈ 5,025 s.
+(Pre-cleaning values — n8 912.5, n3 834.1/6,337 s, n2 783.5/7,706 s — are not
+comparable: they included spike-link energy artifacts; see §2.3. Earlier
+iterations' kWh numbers in §5 are on the old data.)
 
 ### 7.2 NeTrainSim native-driver baseline
-Running NeTrainSim's own driver (no RL): **6,023 s, 887.7 kWh**, with a genuinely
-**varied notch** (mostly 5, with 6/7/2/3). Notably this point sits **above** the
-constant-notch frontier (more energy than constant notch 4 at comparable time), i.e.
-the built-in driver does not outperform simple constant-notch selection here.
+Running NeTrainSim's own driver (no RL) on the clean data: **6,038 s, 848.2 kWh**,
+with a genuinely **varied notch**. This point sits **above** the constant-notch
+frontier (more energy than constant notch 4 at comparable time), i.e. the built-in
+driver does not outperform simple constant-notch selection here. The RL sampled
+policy (800.2 kWh / 6,708 s) uses **5.7% less energy** than the native driver,
+at the cost of ~11 min more trip time. (Old spiky-data value was 6,023 s /
+887.7 kWh — not comparable.)
 
 ### 7.3 RL policy outcomes by iteration
 
@@ -288,6 +363,8 @@ the built-in driver does not outperform simple constant-notch selection here.
 | 5 | per-step pace penalty | 784 kWh / 7,708 s, ~const notch 2 | low energy but ~19% late, not terrain-aware |
 | 6 | coarse control (15 s) | sampled: **6,113 s / 887 kWh, notch spans 0–8**; argmax degenerate (notch 1, timeout) | **first terrain-aware + on-schedule** policy; energy ≈ const. notch 4; argmax needs lower entropy |
 | 7 | + smoothness penalty + lower entropy | deterministic **~constant notch 3: 834 kWh / 6,337 s (on-schedule)** | **eco-optimal operating point**; clean/smooth/deployable; ~8.6% below flat-out, ~6% below NeTrainSim driver |
+| 8 | obs/data bug-fix pass (clean grades, unclipped grade/energy obs, time features, obs 7→9) | constant ent_coef → policy stayed **uniform** (loss/ent ≈ ln 9 all run); argmax notch 0, timeout | fixes necessary but exposed: entropy gradient > advantage gradient |
+| 9 | + entropy anneal 0.004→0 by ep 70 | best −2323 (ep 84); sampled **800.2 kWh / 6,708 s**, mode n2 + n6/8 kicks; argmax = const n2 (758 kWh, 31% late) | sharpest policy yet; const n3 still Pareto-dominates → raise lateness price (W_PACE) next |
 
 ### 7.4 Figures (`results/plots/`, regenerate with `python rl/make_plots.py`)
 - **`energy_time_tradeoff.png`** — constant-notch Pareto frontier (colored by notch)
@@ -323,6 +400,24 @@ the built-in driver does not outperform simple constant-notch selection here.
    a clean *deterministic* eco policy needs entropy annealing; (b) energy is at parity
    with constant notch 3 (≈834–887 kWh), not yet below it — converting notch *variation*
    into net energy *savings* is the next reward/curriculum question.
+6. **The agent had been partially blind (iteration 8).** Stale normalization clipped
+   the grade feature to a sign bit on ~27% of the route and the energy feature on any
+   heavy draw; the input grades contained physics-breaking DEM spikes; and the
+   pace-penalty reward depended on a step counter absent from the observation
+   (non-Markov). Any terrain/schedule modulation was unlearnable *in principle*
+   before these fixes — earlier "no modulation" conclusions partially confounded.
+7. **Exploration–commitment trade-off is real here (iterations 8–9).** With a
+   constant entropy coefficient the per-decision advantage gradient (tiny, because
+   one 15 s notch choice changes the ~−2,500 return by little) is smaller than the
+   entropy gradient — the policy stays uniform forever. Linear annealing to zero
+   produced the sharpest, best-scoring policy of the study (−2323) and removed the
+   degenerate-argmax pathology (argmax now a *sensible* constant notch, not 0/1).
+8. **Current frontier gap is reward calibration:** the learned best (800 kWh,
+   3.2% late) and const-n3 (789 kWh, on-time) score nearly equally because
+   `W_PACE=2` prices ~200 s of lateness at only ≈70 kWh-equivalents. Const n3
+   still Pareto-dominates. Next lever: raise `W_PACE` (≥4) or hard-constrain the
+   deadline, then re-train — the machinery (sharp policy, visible schedule/terrain
+   features, clean data) is now in place.
 
 ---
 
@@ -353,9 +448,12 @@ of superseded runs are archived under `checkpoints/archive_*`.
 
 ---
 
-*Status: iterations 0–7 complete. Final result: a clean **deterministic** policy that
-reaches the **eco-optimal, schedule-feasible operating point** (~constant notch 3, 834 kWh,
-6,337 s) — ~8.6% below flat-out and ~6% below NeTrainSim's native driver. Smoothness
-(`W_SMOOTH`) dials the notch profile between erratic and flat. Open question for future work:
-whether any route/objective on this corridor rewards genuine terrain-aware modulation beyond
-a constant notch (so far it does not).*
+*Status: iterations 0–9 complete. 2026-06-11: data cleaned (DEM spikes), observation
+de-clipped + schedule features added (7→9), entropy annealing added. Best-ever reward
+−2323 (run 2, ep 84, `checkpoints/policy_best.pth`): sampled = 800 kWh / 6,708 s with a
+sharp mode-n2 + kicks profile; argmax = constant n2 (758 kWh) but 31% late. Constant n3
+(789 kWh / 6,442 s, on-time) still Pareto-dominates the learned policy — the gap is now
+reward calibration (lateness priced too cheaply at `W_PACE=2`), no longer optimization or
+observability. Next: raise `W_PACE`, re-train, and re-ask whether terrain-aware modulation
+can beat constant-notch selection on this corridor now that the agent can actually see the
+terrain and the clock.*

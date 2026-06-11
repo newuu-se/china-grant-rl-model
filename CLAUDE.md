@@ -9,40 +9,47 @@ RL-based train energy optimization: a Tianshou PPO agent controls locomotive thr
 respecting speed limits and arriving within the scheduled time window.
 
 Three components:
-1. **NeTrainSim** (`NeTrainSim-adjusted/`) — C++/Qt6 freight train simulator
-2. **RL layer** (`rl/`) — Python: Gymnasium env + Tianshou REINFORCE training script
+1. **NeTrainSim** (`NeTrainSim-adjusted/`) — C++/Qt6 train simulator (GOST resistance,
+   regenerative braking removed, interactive RL mode via `-I`)
+2. **RL layer** (`rl/`) — Python: Gymnasium env + Tianshou PPO training/eval scripts
 3. **Docs** (`gymnasium-docs/`, `tianshou-docs/`) — API reference (do not modify)
 
 ## Repository Layout
 
 ```
 data/
-  coordinates.csv                 750 nodes: tab-sep, no header → node_id  x_m  y_m
-  data.csv                        749 segments: comma-sep, header → idx,Grade%,Curvature,Speed_limit_mps
-  generate_netrainsim_input.py    Converts CSVs → NeTrainSim .dat files in data/netrainsim/
-  netrainsim/
-    nodesFile.dat                 Generated — 750 nodes
-    linksFile.dat                 Generated — 749 links
-    trainsFile.dat                Generated — single diesel train, path node 1→750
+  netrainsim_v2/                  ACTIVE dataset — Toshkent→Ho'jakent, 1500 nodes/1499 links
+    nodesFile_v2_fixed.dat        nodes
+    linksFile_v2_fixed_speed.dat  links with real speed zones (RAW grades — has DEM spikes)
+    linksFile_v2_clean.dat        ← what training uses: spike-cleaned grades
+    trainsFile_rl.dat             ER9E EMU: 3 locos (1213 kW, 60 t, electric) + 3 cars = 373 t
+  clean_grade_spikes.py           regenerates linksFile_v2_clean.dat from _fixed_speed
+  coordinates.csv / data.csv      LEGACY v1 source data (750 nodes, diesel demo)
+  generate_netrainsim_input.py    LEGACY — generates data/netrainsim/ (v1) only
+  netrainsim/                     LEGACY v1 .dat files (not used by training)
 
 NeTrainSim-adjusted/
   src/
-    NeTrainSimConsole/main.cpp    CLI entry point; add --interactive flag here (Phase 2)
+    NeTrainSimConsole/main.cpp    CLI entry; `-I/--interactive` RL JSON loop lives here
     NeTrainSim/
-      simulator.h / simulator.cpp Time-step loop, CSV output, pause/resume API
+      simulator.h / simulator.cpp Time-step loop, CSV output, runOneTimeStep API
       simulatorapi.h              C++ programmatic API (singleton)
       traindefinition/
-        train.h / train.cpp       Physics; optimumThrottleLevels injection point
-        locomotive.h / locomotive.cpp  throttleLevel (0–1), currentLocNotch (0–8)
+        train.h / train.cpp       Physics; per-step energyStat = NEC − NER
+        locomotive.h / locomotive.cpp  rlOverrideEnabled/rlOverrideThrottle injection,
+                                       GOST resistance, regen removed (returns 0)
+        car.cpp                   GOST resistance for cars
       network/
         readwritenetwork.cpp      Parses .dat files; speed in m/s, length in meters
         netlink.cpp               freeFlowSpeed stored and used as m/s
-  src/data/sampleProject/        Reference sample (binary .dat → ASCII text confirmed)
-  build-mac.sh                   Build script
+  build-mac.sh / build-linux.sh  Build scripts (macOS / Linux)
 
 rl/
-  train_env.py                   NeTrainSimEnv (gymnasium.Env subclass)
-  train.py                       Tianshou REINFORCE training script
+  train_env.py                   NeTrainSimEnv (gymnasium.Env, interactive subprocess)
+  train.py                       Tianshou PPO training script (build_policy = source of truth)
+  evaluate.py                    Loads checkpoint, runs greedy/stochastic episode → CSV
+  run_baselines.py               Constant-notch energy/time frontier measurement
+  make_plots.py                  Paper plots into results/plots/
   requirements.txt               Pinned deps matching installed venv
 
 venv/                            Python virtualenv (gymnasium 1.3.0, tianshou 0.5.1, torch 2.x)
@@ -52,41 +59,34 @@ venv/                            Python virtualenv (gymnasium 1.3.0, tianshou 0.
 
 ### NeTrainSim (C++)
 
-Prerequisites: `brew install qt cmake`
+Linux (this machine): `./build-linux.sh` from `NeTrainSim-adjusted/` → binary at
+`build-linux/src/NeTrainSimConsole/NeTrainSim`.
+macOS: `brew install qt cmake`, then `./build-mac.sh`.
 
+Run with the active data + trajectory export (run from inside `NeTrainSim-adjusted/`):
 ```bash
-cd NeTrainSim-adjusted
-./build-mac.sh          # builds NeTrainSimConsole; runs sample simulation into res/
-```
-
-Manual build:
-```bash
-cmake -B build-mac -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=OFF -DBUILD_SERVER=OFF \
-  -DCMAKE_PREFIX_PATH=$(brew --prefix qt6)
-cmake --build build-mac --target NeTrainSimConsole -j$(sysctl -n hw.logicalcpu)
-```
-
-Run with our data + trajectory export (run from inside `NeTrainSim-adjusted/`):
-```bash
-./build-mac/src/NeTrainSimConsole/NeTrainSim \
-  -n ../data/netrainsim/nodesFile.dat \
-  -l ../data/netrainsim/linksFile.dat \
-  -t ../data/netrainsim/trainsFile.dat \
+./build-linux/src/NeTrainSimConsole/NeTrainSim \
+  -n ../data/netrainsim_v2/nodesFile_v2_fixed.dat \
+  -l ../data/netrainsim_v2/linksFile_v2_clean.dat \
+  -t ../data/netrainsim_v2/trainsFile_rl.dat \
   -o res -e true -p 1.0
 ```
 
 CLI flags: `-n` nodes, `-l` links, `-t` trains, `-o` output dir, `-p` timestep in seconds
-(default 1.0), `-z enable optimizer`.
+(default 1.0), `-z` enable optimizer, **`-I` interactive RL mode** (JSON over stdin/stdout).
 **`-e true`** exports the trajectory CSV — `-e` takes a value, NOT a bare flag. `-e` alone uses
 default `false` and produces no CSV.
 
 ### Data preparation
 
 ```bash
-python data/generate_netrainsim_input.py   # generates data/netrainsim/*.dat
+python data/clean_grade_spikes.py          # regenerates linksFile_v2_clean.dat (ACTIVE data)
+python data/generate_netrainsim_input.py   # LEGACY: regenerates v1 data/netrainsim/*.dat
 ```
 
-Re-run this whenever `coordinates.csv` or `data.csv` changes.
+The v2 nodes/links/trains files are hand-derived (no generator); only the grade-cleaning
+step is scripted. Re-run `clean_grade_spikes.py` if `linksFile_v2_fixed_speed.dat` changes,
+then re-measure baselines: `python rl/run_baselines.py`.
 
 ### Python RL layer
 
@@ -109,7 +109,7 @@ print('OK')
 
 ## Data Files
 
-### Source data (in `data/`)
+### Source data (in `data/`) — LEGACY v1 dataset (active training data is `data/netrainsim_v2/`)
 
 **`coordinates.csv`** — tab-separated, no header, 750 rows:
 ```
@@ -132,7 +132,7 @@ Consecutive nodes are ~100 m apart.
 - **Curvature**: unit passed through to NeTrainSim as-is
 - **Speed limit**: **m/s** — values are km/h ÷ 3.6: 1.0, 3.0, 11.1(40), 16.6(60), 19.4(70), 22.2(80)
 
-### Generated NeTrainSim input (in `data/netrainsim/`)
+### Generated NeTrainSim input (in `data/netrainsim/`) — LEGACY v1 (format reference still valid for v2 files)
 
 **`nodesFile.dat`** format (ASCII, tab-separated):
 ```
@@ -191,151 +191,172 @@ Stoppings, tractiveForce_N, ResistanceForces_N, CurrentUsedTractivePower_kw,
 GradeAtTip_Perc, CurvatureAtTip_Perc, FirstLocoNotchPosition, optimizationEnabled
 ```
 `EnergyConsumption_KWH` is the **per-step** net energy consumed this timestep (kWh), not cumulative.
-It equals `train->energyStat = NEC - NER` where NEC/NER are reset at the start of each step.
-Values oscillate ~0–0.2 kWh depending on throttle; the running total (`cumEnergyStat`) reaches ~1,200 kWh for a full trip.
+It equals `train->energyStat = NEC - NER` where NEC/NER are reset at the start of each step
+(`resetTrainEnergyConsumption`, train.cpp). NER ≡ 0 since regen removal.
+Values range ~0–1.4 kWh depending on throttle; a full trip totals ~760–860 kWh (clean data).
 The RL env tracks `_cum_energy_kwh` in Python by summing per-step values.
+NOTE: energy is charged from *virtual* tractive power `(m·a + R)·v` — with impossible grades
+(the raw v2 file's ±17% DEM spikes) this exceeded installed power 3×; clean data keeps it sane.
 
 ### Integration Strategy
 
-**Phase 1 (implemented — no C++ changes):**
-- `NeTrainSimEnv.reset()` runs the full A→B simulation via `subprocess.run()`.
-- The trajectory CSV is loaded into memory; `step()` advances one row per call.
-- Actions are recorded in `info["notch"]` but do NOT affect the simulation
-  (physics is pre-computed). Tests the full Gymnasium/Tianshou pipeline.
-- Episode length: ~6,700 steps (74.87 km at ~11 m/s average).
+**Phase 2 — interactive per-step control (IMPLEMENTED, the only mode in use):**
+- `main.cpp` `-I/--interactive`: loops `read action JSON from stdin → set
+  rlOverrideThrottle on every locomotive → runOneTimeStep() → write state JSON
+  to stdout` (line-prefixed `NTS_JSON `).
+- The RL override (`locomotive.cpp`) bypasses both the built-in A* optimizer and
+  the discretized throttle governor: `getThrottleLevel()` returns
+  `rlOverrideThrottle`, `updateLocNotch()` is a no-op, `train->optimize=false`.
+  Notch→throttle mapping applied in main.cpp: `(notch/Nmax)²` — identical to
+  `defineThrottleLevels()`.
+- `NeTrainSimEnv.reset()` spawns the binary; a bootstrap `{"notch": 0}` fetches
+  the initial state. A reader thread + queue (not select+readline) consumes
+  stdout — immune to buffered-line races.
+- Env-level action repeat: each `step()` holds the notch for CONTROL_INTERVAL=15
+  simulator seconds (~430 decisions per on-schedule trip).
 
-**Phase 2 (TODO — requires C++ change):**
-- Add `--interactive` flag to `main.cpp`; the binary loops: run one timestep →
-  write JSON state to stdout → read JSON action from stdin → set throttle → repeat.
-- Python `step()` sends `{"notch": N}` and reads the response.
-- This enables real per-step RL control.
-
-**stdout state JSON (simulator → Python, Phase 2):**
+**stdout state JSON (simulator → Python):**
 ```json
 {
   "timestep": 42, "speed_mps": 15.3, "position_m": 1230.0,
   "grade_perc": 1.2, "curvature_perc": 0.0, "remaining_dist_m": 73639.6,
-  "energy_kwh": 12.4, "link_max_speed_mps": 11.1, "terminated": false
+  "energy_kwh": 0.4, "link_max_speed_mps": 11.1, "terminated": false, "notch": 3
 }
 ```
-**stdin action JSON (Python → simulator, Phase 2):** `{"notch": 6}`
+`energy_kwh` is the energy of THIS step only (see trajectory CSV note above).
+**stdin action JSON (Python → simulator):** `{"notch": 6}`
+
+(Phase 1 — replaying a pre-computed trajectory CSV — is obsolete and removed.)
 
 ### Gymnasium Environment (`rl/train_env.py`)
 
-**Observation space** (7 floats, `Box`):
+**Observation space** (9 floats, `Box`, all normalized ~[-1,1]/[0,1]):
 ```
 [speed_mps, position_m, grade_perc, curvature_perc,
- remaining_dist_m, energy_kwh, link_max_speed_mps]
+ remaining_dist_m, energy_kwh, link_max_speed_mps,
+ time_frac, behind_frac]
 ```
+`time_frac` = step/DEADLINE_STEPS, `behind_frac` = fraction of route behind the
+deadline pace. These make the clock visible — the pace penalty depends on the
+step counter, so without them the reward would be non-Markov in the observation.
+Normalization denominators (`_GRADE_MAX=4.5`, `_ENERGY_MAX=1.5`, …) are
+calibrated to the CLEAN v2 data; recheck them whenever physics/data change.
 
-**Action space:** `Discrete(9)` — notch 0–8 (maps to locomotive `currentLocNotch`).
+**Action space:** `Discrete(9)` — notch 0–8, held for CONTROL_INTERVAL=15 sim-seconds
+per decision (action repeat; credit assignment was intractable at 1 s decisions).
 
-**Reward (per step)** — defined in `rl/train_env.py`; objective is *minimize trip energy
-subject to a schedule deadline*:
+**Reward (per sim-second, summed over the 15-s decision)** — objective is
+*minimize trip energy subject to the schedule deadline*:
 ```
-r = -W_ENERGY * energy_kwh                           # energy this step          (W_ENERGY=1.0)
-  - W_TIME                                            # uniform per-step time cost (0.05)
-  - W_OVERSPEED * max(0, speed - link_limit)          # speed cap; rarely fires    (1.0)
-  + PROGRESS_BONUS * delta_pos_m / route_len          # path-invariant completion  (1500 total)
-  + ARRIVAL_BONUS - W_LATE*max(0, steps-DEADLINE)  on terminated   (200; deadline 6500 steps)
-  - TIMEOUT_PENALTY                                 on truncated    (1500)
+r = -W_ENERGY * energy_kwh                          # energy this step       (W_ENERGY=3.0)
+  - W_PACE * behind_frac                            # lagging deadline pace  (W_PACE=2.0; 0 when on pace)
+  - W_OVERSPEED * max(0, speed - link_limit)        # safety net; sim caps speed  (1.0)
+  + ARRIVAL_BONUS   on terminated                   # +200
+  - TIMEOUT_PENALTY on truncated                    # -1500
+plus, once per decision: -W_SMOOTH * |Δnotch|       # smoothness         (0.15)
 ```
-There is deliberately **no speed-deficit penalty**: the uniform time cost (not a speed target)
-creates the energy-vs-time trade-off that lets the agent coast where the schedule has slack.
-W_TIME is calibrated from the constant-notch energy curve (see Key Data Facts) so the eco-optimum
-sits near constant notch 3; the agent should beat that by varying notch with grade/speed zone.
+The per-step pace penalty (not a terminal late fee) is what stops the
+crawl-at-notch-1 failure mode; zero penalty when on/ahead of schedule preserves
+the freedom to coast. Eco target = slowest on-schedule constant notch ≈ n3
+(789 kWh / 6,442 s on clean data); the agent should beat it by modulating with
+grade/speed zone.
 
 **Episode boundaries:**
 - `terminated=True`: simulator reports the train reached its destination, or
   `position_m >= TOTAL_ROUTE_LENGTH_M` (74,891.29 m)
 - `truncated=True`: `_step_count >= MAX_STEPS` (12,000) without arriving
 
-### Tianshou REINFORCE (`rl/train.py`) — tianshou 0.5.1 API
+### Tianshou PPO (`rl/train.py`) — tianshou 0.5.1 API
+
+`build_policy()` in `rl/train.py` is the single source of truth (imported by
+`evaluate.py` so train/eval can never drift):
 
 ```python
-from tianshou.policy import PGPolicy          # not tianshou.algorithm.*
+from tianshou.policy import PPOPolicy
 from tianshou.trainer import OnpolicyTrainer
 from tianshou.utils.net.common import Net
-from tianshou.utils.net.discrete import Actor  # use Actor, not DiscreteActor
+from tianshou.utils.net.discrete import Actor, Critic  # use Actor, not DiscreteActor
 
-net   = Net(state_shape=(7,), hidden_sizes=[128, 64], device="cpu")
-actor = Actor(net, action_shape=9, softmax_output=True, device="cpu")
-policy = PGPolicy(
-    model=actor, optim=...,
-    dist_fn=torch.distributions.Categorical,
-    discount_factor=0.99,
-    reward_normalization=True,
-)
-trainer = OnpolicyTrainer(
-    policy, train_collector, test_collector,
-    max_epoch=200, step_per_epoch=10_000,
-    episode_per_collect=1,   # collect full episodes (on-policy requirement)
-    repeat_per_collect=4, episode_per_test=1, batch_size=512,
-)
+# separate actor/critic nets, HIDDEN_SIZES=[256,128,64], OBS_SHAPE=(9,), 9 actions
+policy = PPOPolicy(actor, critic, optim, dist_fn=torch.distributions.Categorical,
+                   discount_factor=0.9999, eps_clip=0.2, ent_coef=0.004,
+                   gae_lambda=0.95, vf_coef=0.5, max_grad_norm=0.5,
+                   advantage_normalization=True, reward_normalization=True)
 ```
-**Important tianshou 0.5.1 notes:**
-- Use `episode_per_collect` (not `step_per_collect`) for episodic envs — REINFORCE needs complete episodes before each update.
-- `reward_normalization=True` normalizes discounted returns across the batch; helps with REINFORCE's high-variance gradients.
-- Switch to `step_per_collect` + PPO if training is too slow (PPO can update mid-episode).
+**Hard-won hyperparameter rationale (don't regress these):**
+- `discount=0.9999`: episodes are ~6k sim-steps of energy SUM; at γ≤0.999 the
+  discounting biases toward finishing fast (high notch). Near-undiscounted keeps
+  the energy objective honest.
+- `reward_normalization=True` required for stability at that γ (returns ~±1000).
+- `ent_coef=0.004`: 0.008 leaves the argmax parked at the energy floor; 0.002
+  collapses to a constant notch.
+- `episode_per_collect` (not `step_per_collect`): full episodes per update.
+- `train_fn` fires at epoch START, `test_fn` after the epoch's updates —
+  checkpoints are saved in `test_fn` so labels match content.
 
 ## RL Design Decisions
 
 | Dimension | Choice | Rationale |
 |-----------|--------|-----------|
-| Action space | `Discrete(9)` notch 0–8 | Matches simulator internals; Categorical is lower-variance than Normal for REINFORCE |
-| State space | 7 features from CSV | All per-step physics state the policy needs |
-| Reward | Dense per-step energy delta + terminal bonus | Sparse reward makes REINFORCE too slow |
-| Algorithm | REINFORCE (`PGPolicy`) | Start here; switch to PPO if gradient variance too high |
-| Parallelism | `DummyVectorEnv(n=1)` | Each env = one C++ subprocess; scale with `SubprocVectorEnv` if needed |
-| Phase | Phase 1 (episodic) now, Phase 2 (interactive) when C++ is ready | |
+| Action space | `Discrete(9)` notch 0–8, 15 s action repeat | Matches simulator internals; coarse control makes long-horizon credit assignment tractable |
+| State space | 9 normalized features (7 physics + 2 schedule) | Pace-penalty reward needs the clock in the obs (Markov) |
+| Reward | Dense per-step energy + pace penalty + terminal | Terminal-only deadline was ignored; raw progress reward biased toward speed |
+| Algorithm | PPO (`PPOPolicy`) | REINFORCE diverged; PPO + reward-norm stable |
+| Parallelism | `SubprocVectorEnv(8)` | Each env = one C++ subprocess |
+| Control mode | Phase 2 interactive (stdin/stdout JSON) | Real per-step physics control |
 
-## C++ Modifications Required (Phase 2)
+## C++ Modifications (Phase 2 — DONE)
 
-**Files to modify:**
+Implemented in:
+- `src/NeTrainSimConsole/main.cpp` — `-I` flag, JSON loop, notch→`(N/Nmax)²` throttle,
+  sets `rlOverrideEnabled/rlOverrideThrottle` + `currentLocNotch` on all locomotives,
+  `train->optimize=false`, drains Qt events each step.
+- `src/NeTrainSim/traindefinition/locomotive.{h,cpp}` — override fields;
+  `getThrottleLevel()` returns the override; `updateLocNotch()` no-op under override.
+- Physics edits (2026-06-10): GOST/SI resistance `w0 = 1.1 + 0.01v + 0.000227v²`
+  (v in km/h) in `Car::getResistance` and `Locomotive::getResistance`; grade term
+  `trackGrade(%)×10×W_kN`; curve term `|curv°|×(700/1746.4)×W_kN`; regenerative
+  braking removed (`getRegenerativeEffeciency` returns 0).
 
-1. `src/NeTrainSimConsole/main.cpp`
-   - Add `QCommandLineOption interactiveOption({"I", "interactive"}, "Interactive RL mode")`
-   - After `createNewSimulationEnvironmentFromFiles()`, if `--interactive`: run the JSON loop
-     instead of calling `sim->runSimulation()`
-
-2. `src/NeTrainSim/simulator.cpp`
-   - Add `runInteractiveLoop()`: calls `runOneTimeStep()`, serializes train state to JSON
-     on stdout, reads action JSON from stdin, sets `train->locomotives[0]->throttleLevel`
-     before next step
-
-**Injection point:** `locomotive->throttleLevel` (double 0–1) directly before each
-`runOneTimeStep()` call. The quadratic notch mapping happens internally. Alternatively,
-pre-populate `train->optimumThrottleLevels` queue (the built-in optimizer's path).
+Rebuild after C++ changes: `cd NeTrainSim-adjusted && ./build-linux.sh`
 
 ## Key Data Facts
 
 - Route: 74.89 km (Toshkent → Ho'jakent line), 1500 nodes, 1499 links, ~50 m per segment.
-  Active input files: `data/netrainsim_v2/{nodesFile_v2_fixed, linksFile_v2_fixed_speed, trainsFile_rl}.dat`
-- Train: ER9E electric multiple unit (replaced the original diesel demo loco)
-- Speed limits (linksFile_v2_fixed_speed.dat): 11.11, 16.67, 19.44, 22.22 m/s (40, 60, 70, 80 km/h).
+  Active input files: `data/netrainsim_v2/{nodesFile_v2_fixed, linksFile_v2_clean, trainsFile_rl}.dat`
+- Train: ER9E electric multiple unit — 3 locos (1213 kW, 60 t, type 1 = electric) +
+  3 cars (2×78 t + 37 t) = 373 t; links have `hasCatenary=1`
+- Speed limits: 11.11, 16.67, 19.44, 22.22 m/s (40, 60, 70, 80 km/h).
   Distance per zone: 31.0 km @ 40, 15.6 km @ 60, 4.0 km @ 70, 24.3 km @ 80.
-- Trip-time bounds: theoretical floor ≈ 5,025 s (speed-limit-bound); fastest feasible ≈ 5,600 s
-  (constant notch 8); RL schedule deadline = 6,500 s (1 step = 1 second)
-- Constant-notch energy/time (measured via interactive sim): n8≈5,600 s/987 kWh, n6≈5,653 s/981,
-  n4≈5,936 s/936, n3≈6,446 s/868, n2≈7,897 s/820 — lower notch = less energy, more time
+- Grades: RAW v2 file had DEM noise spikes to ±17% (links 887/888, 1204/1205…);
+  `linksFile_v2_clean.dat` (median-filtered elevation, net climb 346.6 m preserved)
+  spans −2.7…+4.5%. ALWAYS use the clean file — the spikes break force balance
+  and triple apparent power draw.
+- Trip-time bounds (clean data): theoretical floor ≈ 5,025 s (speed-limit-bound); fastest
+  feasible ≈ 5,602 s (constant notch 8); RL schedule deadline = 6,500 s (1 step = 1 second)
+- Constant-notch energy/time (clean data, `rl/run_baselines.py`, 2026-06-11):
+  n8=5,602 s/862 kWh, n6=5,652/853, n5=5,721/849, n4=5,910/834, n3=6,442/789,
+  n2=8,492/758 — lower notch = less energy, more time. Eco target ≈ n3.
 - The simulator hard-caps speed at each link's freeFlowSpeed, so over-speeding is rare
+- At standstill (v=0) the loco applies full adhesion force regardless of notch
+  (original NeTrainSim behavior) — the train cannot be parked mid-route
 - NeTrainSim speed unit in .dat files: **m/s** (confirmed in netlink.cpp)
 - NeTrainSim .dat files: ASCII text, tab-separated, NOT binary
 
 ## Testing & Validation
 
 ```bash
-# 1. Verify data generation
-python data/generate_netrainsim_input.py
+# 1. Regenerate clean grades (only needed if the raw links file changed)
+python data/clean_grade_spikes.py
 
-# 2. Verify simulator runs with our data (run from inside NeTrainSim-adjusted/)
+# 2. Verify simulator runs with the active data (run from inside NeTrainSim-adjusted/)
 cd NeTrainSim-adjusted && mkdir -p res
-./build-mac/src/NeTrainSimConsole/NeTrainSim \
-  -n ../data/netrainsim/nodesFile.dat \
-  -l ../data/netrainsim/linksFile.dat \
-  -t ../data/netrainsim/trainsFile.dat \
+./build-linux/src/NeTrainSimConsole/NeTrainSim \
+  -n ../data/netrainsim_v2/nodesFile_v2_fixed.dat \
+  -l ../data/netrainsim_v2/linksFile_v2_clean.dat \
+  -t ../data/netrainsim_v2/trainsFile_rl.dat \
   -o res -e true -p 1.0        # note: -e takes 'true', not a bare flag
-ls res/trainTrajectory_*.csv   # must show a CSV with ~7100 rows
+ls res/trainTrajectory_*.csv
 
 # 3. Validate Gymnasium env
 python -c "
@@ -346,6 +367,10 @@ check_env(NeTrainSimEnv())
 print('OK')
 "
 
-# 4. Run training
+# 4. Measure constant-notch baselines (recalibrates reward comments/plots)
+python rl/run_baselines.py
+
+# 5. Run training (use tmux for long runs), then evaluate
 python rl/train.py
+python rl/evaluate.py          # → results/notch_profile.csv (prefers policy_best.pth)
 ```

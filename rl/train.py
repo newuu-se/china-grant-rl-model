@@ -8,8 +8,9 @@ Improvements over REINFORCE:
   - repeat_per_collect reuses each batch of episodes (more efficient)
 
 Reward (defined in train_env.py): minimize trip energy subject to a schedule
-deadline — uniform per-step time cost trades off against energy, no speed-limit
-target. discount=0.999 so the deadline/arrival signals reach the early steps.
+deadline — per-step pace penalty when lagging the deadline pace trades off
+against energy. discount=0.9999 (near-undiscounted) so the ~6k-step energy sum
+is not distorted and arrival/timeout signals reach the early steps.
 
 Run:
     source venv/bin/activate
@@ -46,9 +47,14 @@ DISCOUNT     = 0.9999  # episodes are ~6k steps (1 step = 1 s); this is a near-u
                        # finishing sooner (= high notch, high energy — a run plateaued at ~965 kWh).
                        # 0.9999 (effective horizon ~10k > episode) keeps the energy objective
                        # ~undistorted and the arrival/timeout terminal signals visible.
-ENT_COEF     = 0.004   # middle ground: 0.008 was too jumpy, 0.002 (+smoothness) collapsed to a
-                       # constant notch. 0.004 keeps enough exploration for terrain-driven variation
-                       # while the deterministic policy stays usable
+ENT_COEF     = 0.004   # INITIAL value — linearly annealed to 0 by ENT_ANNEAL_END (see train_fn).
+                       # A constant coefficient pinned the policy at uniform (run 2026-06-11_1140:
+                       # loss/ent stayed at 2.190 ≈ ln 9 for all 100 epochs; sampled histogram flat
+                       # 29-58 per notch; argmax parked at notch 0 and timed out). The per-decision
+                       # advantage gradient is smaller than the entropy gradient, so exploration
+                       # must taper for the policy to commit.
+ENT_ANNEAL_END = 70    # epoch at which the entropy bonus reaches 0; the last 30 epochs converge
+                       # the now-committed policy
 MAX_EPOCH    = 100     # stable now (reward-norm); 100 epochs to let the pace-penalty policy
                        # converge to a clean on-schedule eco operating point
 
@@ -61,7 +67,7 @@ STEP_PER_EPOCH       = 3_000   # env-steps/epoch. With CONTROL_INTERVAL=15 an ep
 
 # PPO / network architecture — single source of truth, also imported by evaluate.py
 # so the eval-time policy can never drift from the trained one.
-OBS_SHAPE     = (7,)
+OBS_SHAPE     = (9,)   # 7 physics features + time_frac + behind_frac (see train_env.py)
 N_ACTIONS     = 9
 EPS_CLIP      = 0.2     # clip ratio — prevents large destructive updates
 VF_COEF       = 0.5     # value-loss weight
@@ -81,22 +87,31 @@ def make_env():
 
 
 def train_fn(epoch: int, env_step: int) -> None:
+    # Entropy annealing: linear ENT_COEF → 0 by ENT_ANNEAL_END. tianshou 0.5.1
+    # PPOPolicy reads self._weight_ent at every update, so setting it here (epoch
+    # start) applies to all of this epoch's gradient steps.
+    policy._weight_ent = ENT_COEF * max(0.0, 1.0 - epoch / ENT_ANNEAL_END)
     elapsed = (time.time() - _train_start) / 60
     print(
         f"\n{'━'*65}\n"
-        f"  Epoch {epoch:3d}/{MAX_EPOCH}  │  {env_step:>10,} steps  │  {elapsed:.1f} min elapsed\n"
+        f"  Epoch {epoch:3d}/{MAX_EPOCH}  │  {env_step:>10,} steps  │  {elapsed:.1f} min elapsed"
+        f"  │  ent_coef={policy._weight_ent:.5f}\n"
         f"{'━'*65}",
         flush=True,
     )
+
+
+def test_fn(epoch: int, env_step: int) -> None:
+    # test_fn fires AFTER the epoch's training updates (tianshou calls it at the
+    # start of the end-of-epoch test), so checkpoints saved here genuinely
+    # contain `epoch` epochs of training. (train_fn fires at epoch START — saving
+    # there labeled checkpoints one epoch ahead of their contents.)
+    print(f"  [test]", flush=True)
     if epoch % 10 == 0:
         os.makedirs(CHECKPOINT_DIR, exist_ok=True)
         path = os.path.join(CHECKPOINT_DIR, f"policy_epoch{epoch:03d}.pth")
         torch.save(policy.state_dict(), path)
         print(f"  → checkpoint: {path}", flush=True)
-
-
-def test_fn(epoch: int, env_step: int) -> None:
-    print(f"  [test]", flush=True)
 
 
 def save_best_fn(pol) -> None:
@@ -141,8 +156,8 @@ def main():
     print(f"  Device       : {DEVICE}")
     print(f"  Train envs   : {NUM_TRAIN_ENVS} parallel C++ simulators")
     print(f"  Epochs       : {MAX_EPOCH}  (checkpoint every 10)")
-    print(f"  Algorithm    : PPO  (eps_clip=0.2, ent_coef={ENT_COEF}, discount={DISCOUNT}, repeat={REPEAT_PER_COLLECT}×)")
-    print(f"  Reward       : -energy/step  -time/step  -overspeed  +progress  +{ARRIVAL_BONUS:.0f} arrival (deadline {DEADLINE_STEPS} steps)")
+    print(f"  Algorithm    : PPO  (eps_clip=0.2, ent_coef={ENT_COEF}→0 by ep{ENT_ANNEAL_END}, discount={DISCOUNT}, repeat={REPEAT_PER_COLLECT}×)")
+    print(f"  Reward       : -energy/step  -pace(behind-schedule)/step  -overspeed  -smooth|Δnotch|  +{ARRIVAL_BONUS:.0f} arrival (deadline {DEADLINE_STEPS} steps)")
     print("━" * 65 + "\n")
 
     train_envs = SubprocVectorEnv([make_env] * NUM_TRAIN_ENVS)

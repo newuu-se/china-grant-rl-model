@@ -18,6 +18,7 @@ import csv
 import glob
 import os
 import re
+import sys
 
 import matplotlib
 matplotlib.use("Agg")
@@ -26,17 +27,26 @@ from matplotlib.ticker import MultipleLocator
 import numpy as np
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LINKS = os.path.join(_REPO, "data", "netrainsim_v2", "linksFile_v2_fixed_speed.dat")
-PROFILE = os.path.join(_REPO, "results", "notch_profile.csv")
+sys.path.insert(0, _REPO)
+from rl.train_env import CONTROL_INTERVAL, LINKS_FILE as LINKS  # same data the env trains on
+# Sampled rollout is the representative trained behavior (matches RL_STEPS/RL_ENERGY);
+# notch_profile.csv holds the argmax rollout.
+PROFILE = os.path.join(_REPO, "results", "notch_profile_stochastic.csv")
 NTS_GLOB = os.path.join(_REPO, "NeTrainSim-adjusted", "res", "trainTrajectory_*.csv")
 OUTDIR = os.path.join(_REPO, "results", "plots")
 os.makedirs(OUTDIR, exist_ok=True)
 
-# Measured constant-notch curve under the CURRENT physics (GOST Davis + no regen)
+# Measured constant-notch curve — STALE WHENEVER PHYSICS OR INPUT DATA CHANGES;
+# regenerate with `python rl/run_baselines.py` and paste its output here.
+# Current: GOST Davis, no regen, linksFile_v2_clean.dat (2026-06-11).
 NOTCH = [8, 6, 5, 4, 3, 2]
-STEPS = [5603, 5654, 5716, 5888, 6337, 7706]
-ENERGY = [912.47, 909.28, 896.94, 881.53, 834.13, 783.52]
-RL_STEPS, RL_ENERGY = 6337, 834.1        # RL eval (deterministic): converged to eco-optimal ~constant notch 3
+STEPS = [5602, 5652, 5721, 5910, 6442, 8492]
+ENERGY = [862.41, 853.46, 849.10, 834.37, 788.63, 758.39]
+# RL eval point — update after each `python rl/evaluate.py` run.
+# Run 2 (2026-06-11, entropy anneal, policy_best ep84), SAMPLED rollout — the
+# representative behavior; the argmax is constant n2 (758 kWh / 8,492 s, late).
+RL_STEPS, RL_ENERGY = 6708, 800.2
+RL_LABEL = "RL policy (sampled)"
 
 # ── shared "advanced" styling ────────────────────────────────────────────────
 plt.rcParams.update({
@@ -81,8 +91,10 @@ def load_profile():
             if "position_m" in row:
                 pos.append(float(row["position_m"]))
     speed = np.array(speed)
-    # Use true position if present (correct under action-repeat); else fall back.
-    dist = np.array(pos) if len(pos) == len(speed) else np.cumsum(speed)
+    # Use true position if present (correct under action-repeat); else integrate
+    # speed × decision duration (each CSV row spans CONTROL_INTERVAL sim seconds).
+    dist = (np.array(pos) if len(pos) == len(speed)
+            else np.cumsum(speed * CONTROL_INTERVAL))
     return dist, speed, np.array(notch)
 
 
@@ -132,7 +144,7 @@ def plot_tradeoff():
 
     # RL greedy policy
     ax.scatter([RL_STEPS], [RL_ENERGY], color=RLC, s=320, marker="*", zorder=5,
-               edgecolors="white", linewidths=1.5, label=f"RL policy (deterministic)  ({RL_ENERGY:.0f} kWh, {RL_STEPS:,} s)")
+               edgecolors="white", linewidths=1.5, label=f"{RL_LABEL}  ({RL_ENERGY:.0f} kWh, {RL_STEPS:,} s)")
     # NeTrainSim native driver
     if nts:
         nts_e = float(nts["energy_cum"][-1]); nts_s = nts["steps"]
@@ -143,7 +155,10 @@ def plot_tradeoff():
     ax.set_xlabel("trip time  (s)"); ax.set_ylabel("total trip energy  (kWh)")
     ax.set_title("Energy vs Trip Time — ER9E on Toshkent→Ho'jakent\nGOST resistance, regenerative braking removed")
     ax.legend(loc="upper right", fontsize=10.5)
-    ax.set_xlim(5350, 8050); ax.set_ylim(752, 930)
+    # axes derived from the data so new baseline/RL points are never cropped
+    xs_all = STEPS + [RL_STEPS]; ys_all = ENERGY + [RL_ENERGY]
+    ax.set_xlim(min(xs_all) - 250, max(xs_all) + 350)
+    ax.set_ylim(min(ys_all) - 30, max(ys_all) + 40)
     p = os.path.join(OUTDIR, "energy_time_tradeoff.png"); fig.savefig(p); plt.close(fig); return p
 
 
@@ -187,7 +202,7 @@ def plot_profile():
     axes[0].plot(dist / 1000, speed, color=ACCENT, lw=1, label="train speed")
     axes[0].plot(cum[1:] / 1000, spd_lim, color=NTSC, lw=1, alpha=.7, ls="--", label="speed limit")
     axes[0].set_ylabel("speed (m/s)"); axes[0].legend(loc="upper right", fontsize=9)
-    axes[0].set_title(f"RL policy (deterministic) along the route  ({RL_ENERGY:.0f} kWh, {RL_STEPS:,} s)")
+    axes[0].set_title(f"{RL_LABEL} along the route  ({RL_ENERGY:.0f} kWh, {RL_STEPS:,} s)")
     axes[1].step(dist / 1000, notch, where="post", color=RLC, lw=1)
     axes[1].set_ylabel("notch"); axes[1].set_ylim(-0.5, 8.5)
     axes[2].fill_between(cum[1:] / 1000, grade, color="#6b7280", alpha=.5, step="mid")
