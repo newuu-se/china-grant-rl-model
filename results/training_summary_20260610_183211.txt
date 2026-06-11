@@ -1,0 +1,100 @@
+════════════════════════════════════════════════════════════
+  PPO Training Session Summary
+════════════════════════════════════════════════════════════
+  generated : Wed Jun 10 06:32:11 PM +05 2026
+  status    : COMPLETED
+  source log: logs/train_run_20260610_181810.log
+  log copy  : results/training_log_20260610_183211.log
+
+── final metrics ────────────────────────────────────────────
+  Training complete in 13.9 min
+  Best reward : -2576.472
+  Final model : /home/asilbek/china-grant-rl-model/rl/../checkpoints/policy_final.pth
+
+── best_reward per test epoch (last 30) ─────────────────────
+Epoch #71: test_reward: -2603.794487 ± 0.000000, best_reward: -2603.794487 ± 0.000000 in #71
+Epoch #72: test_reward: -2632.074836 ± 0.000000, best_reward: -2603.794487 ± 0.000000 in #71
+Epoch #73: test_reward: -2650.121781 ± 0.000000, best_reward: -2603.794487 ± 0.000000 in #71
+Epoch #74: test_reward: -2671.886078 ± 0.000000, best_reward: -2603.794487 ± 0.000000 in #71
+Epoch #75: test_reward: -2650.083349 ± 0.000000, best_reward: -2603.794487 ± 0.000000 in #71
+Epoch #76: test_reward: -2687.077327 ± 0.000000, best_reward: -2603.794487 ± 0.000000 in #71
+Epoch #77: test_reward: -2648.769477 ± 0.000000, best_reward: -2603.794487 ± 0.000000 in #71
+Epoch #78: test_reward: -2642.380072 ± 0.000000, best_reward: -2603.794487 ± 0.000000 in #71
+Epoch #79: test_reward: -2661.023069 ± 0.000000, best_reward: -2603.794487 ± 0.000000 in #71
+Epoch #80: test_reward: -2643.256511 ± 0.000000, best_reward: -2603.794487 ± 0.000000 in #71
+Epoch #81: test_reward: -2669.592200 ± 0.000000, best_reward: -2603.794487 ± 0.000000 in #71
+Epoch #82: test_reward: -2640.686091 ± 0.000000, best_reward: -2603.794487 ± 0.000000 in #71
+Epoch #83: test_reward: -2679.792438 ± 0.000000, best_reward: -2603.794487 ± 0.000000 in #71
+Epoch #84: test_reward: -2652.593472 ± 0.000000, best_reward: -2603.794487 ± 0.000000 in #71
+Epoch #85: test_reward: -2638.984889 ± 0.000000, best_reward: -2603.794487 ± 0.000000 in #71
+Epoch #86: test_reward: -2678.206189 ± 0.000000, best_reward: -2603.794487 ± 0.000000 in #71
+Epoch #87: test_reward: -2670.800132 ± 0.000000, best_reward: -2603.794487 ± 0.000000 in #71
+Epoch #88: test_reward: -2653.220593 ± 0.000000, best_reward: -2603.794487 ± 0.000000 in #71
+Epoch #89: test_reward: -2647.388570 ± 0.000000, best_reward: -2603.794487 ± 0.000000 in #71
+Epoch #90: test_reward: -2590.305100 ± 0.000000, best_reward: -2590.305100 ± 0.000000 in #90
+Epoch #91: test_reward: -2581.711255 ± 0.000000, best_reward: -2581.711255 ± 0.000000 in #91
+Epoch #92: test_reward: -2640.886460 ± 0.000000, best_reward: -2581.711255 ± 0.000000 in #91
+Epoch #93: test_reward: -2623.847046 ± 0.000000, best_reward: -2581.711255 ± 0.000000 in #91
+Epoch #94: test_reward: -2632.239863 ± 0.000000, best_reward: -2581.711255 ± 0.000000 in #91
+Epoch #95: test_reward: -2615.289717 ± 0.000000, best_reward: -2581.711255 ± 0.000000 in #91
+Epoch #96: test_reward: -2601.703630 ± 0.000000, best_reward: -2581.711255 ± 0.000000 in #91
+Epoch #97: test_reward: -2619.027575 ± 0.000000, best_reward: -2581.711255 ± 0.000000 in #91
+Epoch #98: test_reward: -2607.048742 ± 0.000000, best_reward: -2581.711255 ± 0.000000 in #91
+Epoch #99: test_reward: -2582.122931 ± 0.000000, best_reward: -2581.711255 ± 0.000000 in #91
+Epoch #100: test_reward: -2576.471576 ± 0.000000, best_reward: -2576.471576 ± 0.000000 in #100
+
+── last 8 episode outcomes ──────────────────────────────────
+[✓ ARRIVED]  ep= 199  5,844 steps   74,891m (100.0%)  energy=  886.9 kWh  reward= -2610.4  6.9s
+[✓ ARRIVED]  ep= 199  5,894 steps   74,891m (100.0%)  energy=  877.8 kWh  reward= -2597.2  7.2s
+[✓ ARRIVED]  ep= 199  5,893 steps   74,891m (100.0%)  energy=  866.2 kWh  reward= -2538.9  7.2s
+[✓ ARRIVED]  ep= 199  5,888 steps   74,891m (100.0%)  energy=  873.2 kWh  reward= -2565.5  7.2s
+[✓ ARRIVED]  ep= 199  5,911 steps   74,891m (100.0%)  energy=  868.2 kWh  reward= -2551.0  7.5s
+[✓ ARRIVED]  ep= 199  5,903 steps   74,891m (100.0%)  energy=  880.5 kWh  reward= -2594.0  7.5s
+[✓ ARRIVED]  ep= 199  6,045 steps   74,891m (100.0%)  energy=  884.6 kWh  reward= -2623.4  7.8s
+[✓ ARRIVED]  ep= 302  6,094 steps   74,891m (100.0%)  energy=  876.4 kWh  reward= -2576.5  2.7s
+
+── checkpoints saved ────────────────────────────────────────
+  policy_best.pth
+  policy_epoch010.pth
+  policy_epoch020.pth
+  policy_epoch030.pth
+  policy_epoch040.pth
+  policy_epoch050.pth
+  policy_epoch060.pth
+  policy_epoch070.pth
+  policy_epoch080.pth
+  policy_epoch090.pth
+  policy_epoch100.pth
+  policy_final.pth
+
+── tail of log (last 30 lines) ──────────────────────────────
+[✓ ARRIVED]  ep= 197  5,898 steps   74,891m (100.0%)  energy=  884.5 kWh  reward= -2610.6  7.5s
+[✓ ARRIVED]  ep= 197  5,926 steps   74,891m (100.0%)  energy=  882.8 kWh  reward= -2605.8  7.8s
+Epoch #99: 3135it [00:04, 643.55it/s]              Epoch #99: 3135it [00:05, 643.55it/s, env_step=307985, len=391, loss=-0.009, loss/clip=-0.000, loss/ent=2.163, loss/vf=0.000, n/ep=8, n/st=3135, rew=-2600.43]Epoch #99: 3135it [00:05, 625.27it/s, env_step=307985, len=391, loss=-0.009, loss/clip=-0.000, loss/ent=2.163, loss/vf=0.000, n/ep=8, n/st=3135, rew=-2600.43]
+  [test]
+[✓ ARRIVED]  ep= 299  5,994 steps   74,891m (100.0%)  energy=  875.5 kWh  reward= -2582.1  2.7s
+Epoch #99: test_reward: -2582.122931 ± 0.000000, best_reward: -2581.711255 ± 0.000000 in #91
+Epoch #100:   0%|          | 0/3000 [00:00<?, ?it/s]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Epoch 100/100  │     307,985 steps  │  13.7 min elapsed
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  → checkpoint: /home/asilbek/china-grant-rl-model/rl/../checkpoints/policy_epoch100.pth
+[✓ ARRIVED]  ep= 199  5,834 steps   74,891m (100.0%)  energy=  883.3 kWh  reward= -2584.9  6.6s
+[✓ ARRIVED]  ep= 199  5,844 steps   74,891m (100.0%)  energy=  886.9 kWh  reward= -2610.4  6.9s
+[✓ ARRIVED]  ep= 199  5,894 steps   74,891m (100.0%)  energy=  877.8 kWh  reward= -2597.2  7.2s
+[✓ ARRIVED]  ep= 199  5,893 steps   74,891m (100.0%)  energy=  866.2 kWh  reward= -2538.9  7.2s
+[✓ ARRIVED]  ep= 199  5,888 steps   74,891m (100.0%)  energy=  873.2 kWh  reward= -2565.5  7.2s
+[✓ ARRIVED]  ep= 199  5,911 steps   74,891m (100.0%)  energy=  868.2 kWh  reward= -2551.0  7.5s
+[✓ ARRIVED]  ep= 199  5,903 steps   74,891m (100.0%)  energy=  880.5 kWh  reward= -2594.0  7.5s
+[✓ ARRIVED]  ep= 199  6,045 steps   74,891m (100.0%)  energy=  884.6 kWh  reward= -2623.4  7.8s
+Epoch #100: 3149it [00:04, 663.04it/s]              Epoch #100: 3149it [00:04, 663.04it/s, env_step=311134, len=393, loss=-0.009, loss/clip=-0.000, loss/ent=2.155, loss/vf=0.000, n/ep=8, n/st=3149, rew=-2583.18]Epoch #100: 3149it [00:04, 642.86it/s, env_step=311134, len=393, loss=-0.009, loss/clip=-0.000, loss/ent=2.155, loss/vf=0.000, n/ep=8, n/st=3149, rew=-2583.18]
+  [test]
+[✓ ARRIVED]  ep= 302  6,094 steps   74,891m (100.0%)  energy=  876.4 kWh  reward= -2576.5  2.7s
+  → new best saved: /home/asilbek/china-grant-rl-model/rl/../checkpoints/policy_best.pth
+Epoch #100: test_reward: -2576.471576 ± 0.000000, best_reward: -2576.471576 ± 0.000000 in #100
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Training complete in 13.9 min
+  Best reward : -2576.472
+  Final model : /home/asilbek/china-grant-rl-model/rl/../checkpoints/policy_final.pth
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

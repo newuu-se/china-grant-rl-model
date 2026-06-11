@@ -71,6 +71,10 @@ W_PACE          = 2.0      # per-step penalty per (fraction-of-route) BEHIND the
                            # zero when on/ahead → coast freely; lagging → pushed to keep pace.
                            # Replaces the terminal-only late penalty the crawling mode ignored.
 W_OVERSPEED     = 1.0      # per (m/s) over the link limit (safety net; sim hard-caps speed)
+W_SMOOTH        = 0.15     # penalty per |Δnotch| between consecutive 15-s decisions. 0.5 (+low
+                           # entropy) collapsed the policy to a single constant notch; 0.15 is the
+                           # middle ground — discourages erratic 0↔8 jumping but lets the agent hold
+                           # notches for stretches and shift a few times with terrain.
 ARRIVAL_BONUS   = 200.0    # one-shot reward at terminus
 TIMEOUT_PENALTY = 1500.0   # large enough that giving up is never the best option
 
@@ -113,6 +117,7 @@ class NeTrainSimEnv(gym.Env):
         self._episode_start: float = 0.0
         self._episode_reward: float = 0.0
         self._last_position_m: float = 0.0  # for per-step progress reward
+        self._prev_notch: int | None = None  # for the notch-change (smoothness) penalty
 
         if not os.path.isfile(SIMULATOR_BIN):
             raise FileNotFoundError(
@@ -132,6 +137,7 @@ class NeTrainSimEnv(gym.Env):
         self._episode_reward = 0.0
         self._cum_energy_kwh = 0.0
         self._last_position_m = 0.0
+        self._prev_notch = None
         self._episode_start = time.time()
         self._episode_count += 1
         self._start_interactive_simulator()
@@ -153,10 +159,18 @@ class NeTrainSimEnv(gym.Env):
         if notch < 0 or notch > 8:
             raise ValueError(f"Action notch must be in [0, 8], got {notch}")
 
+        # Notch-change (smoothness) penalty, once per decision: discourages erratic
+        # throttle jumping so the notch profile stays smooth/realistic. Skipped on the
+        # first decision of an episode (no previous notch to compare against).
+        change_penalty = (W_SMOOTH * abs(notch - self._prev_notch)
+                          if self._prev_notch is not None else 0.0)
+        self._prev_notch = notch
+        self._episode_reward -= change_penalty
+
         # Coarse control (action repeat): hold the chosen notch for CONTROL_INTERVAL
         # simulator seconds, summing reward, then decide again. Fewer, longer
         # decisions → tractable credit assignment → terrain-aware notch modulation.
-        total_reward = 0.0
+        total_reward = -change_penalty
         terminated = truncated = False
         step_energy_kwh = 0.0
         for _ in range(CONTROL_INTERVAL):

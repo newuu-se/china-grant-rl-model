@@ -46,8 +46,9 @@ DISCOUNT     = 0.9999  # episodes are ~6k steps (1 step = 1 s); this is a near-u
                        # finishing sooner (= high notch, high energy — a run plateaued at ~965 kWh).
                        # 0.9999 (effective horizon ~10k > episode) keeps the energy objective
                        # ~undistorted and the arrival/timeout terminal signals visible.
-ENT_COEF     = 0.008   # exploration; bumped 0.005→0.008 to reach the eco (coasting) basin —
-                       # safe now that REWARD_NORM=True stabilizes the large-return value fn
+ENT_COEF     = 0.004   # middle ground: 0.008 was too jumpy, 0.002 (+smoothness) collapsed to a
+                       # constant notch. 0.004 keeps enough exploration for terrain-driven variation
+                       # while the deterministic policy stays usable
 MAX_EPOCH    = 100     # stable now (reward-norm); 100 epochs to let the pace-penalty policy
                        # converge to a clean on-schedule eco operating point
 
