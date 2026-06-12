@@ -53,10 +53,12 @@ ENT_COEF     = 0.004   # INITIAL value — linearly annealed to 0 by ENT_ANNEAL_
                        # 29-58 per notch; argmax parked at notch 0 and timed out). The per-decision
                        # advantage gradient is smaller than the entropy gradient, so exploration
                        # must taper for the policy to commit.
-ENT_ANNEAL_END = 70    # epoch at which the entropy bonus reaches 0; the last 30 epochs converge
-                       # the now-committed policy
-MAX_EPOCH    = 100     # stable now (reward-norm); 100 epochs to let the pace-penalty policy
-                       # converge to a clean on-schedule eco operating point
+ENT_ANNEAL_END = 140   # epoch at which the entropy bonus reaches 0 (70% of MAX_EPOCH, same
+                       # fraction as the 100-epoch runs); the remaining epochs converge the
+                       # now-committed policy on the pure objective
+MAX_EPOCH    = 200     # doubled from 100: the 100-epoch return run was still improving at the
+                       # final epoch (best @ ep100), and the forward run's argmax stopped one
+                       # notch short of the eco optimum — both point at training budget
 
 EPISODES_PER_COLLECT = NUM_TRAIN_ENVS   # 8 parallel episodes before each update
 EPISODES_PER_TEST    = 1
@@ -86,41 +88,6 @@ def make_env():
     return NeTrainSimEnv()
 
 
-def train_fn(epoch: int, env_step: int) -> None:
-    # Entropy annealing: linear ENT_COEF → 0 by ENT_ANNEAL_END. tianshou 0.5.1
-    # PPOPolicy reads self._weight_ent at every update, so setting it here (epoch
-    # start) applies to all of this epoch's gradient steps.
-    policy._weight_ent = ENT_COEF * max(0.0, 1.0 - epoch / ENT_ANNEAL_END)
-    elapsed = (time.time() - _train_start) / 60
-    print(
-        f"\n{'━'*65}\n"
-        f"  Epoch {epoch:3d}/{MAX_EPOCH}  │  {env_step:>10,} steps  │  {elapsed:.1f} min elapsed"
-        f"  │  ent_coef={policy._weight_ent:.5f}\n"
-        f"{'━'*65}",
-        flush=True,
-    )
-
-
-def test_fn(epoch: int, env_step: int) -> None:
-    # test_fn fires AFTER the epoch's training updates (tianshou calls it at the
-    # start of the end-of-epoch test), so checkpoints saved here genuinely
-    # contain `epoch` epochs of training. (train_fn fires at epoch START — saving
-    # there labeled checkpoints one epoch ahead of their contents.)
-    print(f"  [test]", flush=True)
-    if epoch % 10 == 0:
-        os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-        path = os.path.join(CHECKPOINT_DIR, f"policy_epoch{epoch:03d}.pth")
-        torch.save(policy.state_dict(), path)
-        print(f"  → checkpoint: {path}", flush=True)
-
-
-def save_best_fn(pol) -> None:
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    best_path = os.path.join(CHECKPOINT_DIR, "policy_best.pth")
-    torch.save(pol.state_dict(), best_path)
-    print(f"  → new best saved: {best_path}", flush=True)
-
-
 def build_policy(device: str = DEVICE):
     """Construct the PPO policy (and its actor/critic/optim) from the shared
     hyperparameters above. Used by both training and evaluation so the two can
@@ -147,24 +114,62 @@ def build_policy(device: str = DEVICE):
     return policy, actor, critic, optim
 
 
-def main():
-    global policy
-
+def run_training(make_env_fn=make_env,
+                 checkpoint_dir: str = CHECKPOINT_DIR,
+                 trip_label: str = "A→B (Toshkent→Ho'jakent)"):
+    """Full PPO training loop. Parameterized so the return trip (and any future
+    scenario) reuses the exact same trainer — only the env factory, checkpoint
+    directory, and banner differ. Used by train.py (forward) and
+    train_return.py (B→A)."""
     print("━" * 65)
     print("  PPO Training — NeTrainSim Energy Optimization")
+    print(f"  Trip         : {trip_label}")
     print("━" * 65)
     print(f"  Device       : {DEVICE}")
     print(f"  Train envs   : {NUM_TRAIN_ENVS} parallel C++ simulators")
     print(f"  Epochs       : {MAX_EPOCH}  (checkpoint every 10)")
+    print(f"  Checkpoints  : {os.path.relpath(checkpoint_dir)}")
     print(f"  Algorithm    : PPO  (eps_clip=0.2, ent_coef={ENT_COEF}→0 by ep{ENT_ANNEAL_END}, discount={DISCOUNT}, repeat={REPEAT_PER_COLLECT}×)")
     print(f"  Reward       : -energy/step  -pace(behind-schedule)/step  -overspeed  -smooth|Δnotch|  +{ARRIVAL_BONUS:.0f} arrival (deadline {DEADLINE_STEPS} steps)")
     print("━" * 65 + "\n")
 
-    train_envs = SubprocVectorEnv([make_env] * NUM_TRAIN_ENVS)
-    test_envs  = SubprocVectorEnv([make_env] * NUM_TEST_ENVS)
+    train_envs = SubprocVectorEnv([make_env_fn] * NUM_TRAIN_ENVS)
+    test_envs  = SubprocVectorEnv([make_env_fn] * NUM_TEST_ENVS)
 
     # Actor/critic/optim/policy from the shared factory (see build_policy).
     policy, actor, critic, optim = build_policy(DEVICE)
+
+    def train_fn(epoch: int, env_step: int) -> None:
+        # Entropy annealing: linear ENT_COEF → 0 by ENT_ANNEAL_END. tianshou
+        # 0.5.1 PPOPolicy reads self._weight_ent at every update, so setting it
+        # here (epoch start) applies to all of this epoch's gradient steps.
+        policy._weight_ent = ENT_COEF * max(0.0, 1.0 - epoch / ENT_ANNEAL_END)
+        elapsed = (time.time() - _train_start) / 60
+        print(
+            f"\n{'━'*65}\n"
+            f"  Epoch {epoch:3d}/{MAX_EPOCH}  │  {env_step:>10,} steps  │  {elapsed:.1f} min elapsed"
+            f"  │  ent_coef={policy._weight_ent:.5f}\n"
+            f"{'━'*65}",
+            flush=True,
+        )
+
+    def test_fn(epoch: int, env_step: int) -> None:
+        # test_fn fires AFTER the epoch's training updates (tianshou calls it at
+        # the start of the end-of-epoch test), so checkpoints saved here
+        # genuinely contain `epoch` epochs of training. (train_fn fires at epoch
+        # START — saving there labeled checkpoints one epoch ahead.)
+        print(f"  [test]", flush=True)
+        if epoch % 10 == 0:
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            path = os.path.join(checkpoint_dir, f"policy_epoch{epoch:03d}.pth")
+            torch.save(policy.state_dict(), path)
+            print(f"  → checkpoint: {path}", flush=True)
+
+    def save_best_fn(pol) -> None:
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        best_path = os.path.join(checkpoint_dir, "policy_best.pth")
+        torch.save(pol.state_dict(), best_path)
+        print(f"  → new best saved: {best_path}", flush=True)
 
     buffer = VectorReplayBuffer(
         total_size=8_000 * NUM_TRAIN_ENVS,
@@ -192,8 +197,8 @@ def main():
 
     result = trainer.run()
 
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    final_path = os.path.join(CHECKPOINT_DIR, "policy_final.pth")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    final_path = os.path.join(checkpoint_dir, "policy_final.pth")
     torch.save(policy.state_dict(), final_path)
 
     total_min = (time.time() - _train_start) / 60
@@ -202,6 +207,11 @@ def main():
     print(f"  Best reward : {result['best_reward']:.3f}")
     print(f"  Final model : {final_path}")
     print(f"{'━'*65}")
+    return result
+
+
+def main():
+    run_training()
 
 
 if __name__ == "__main__":

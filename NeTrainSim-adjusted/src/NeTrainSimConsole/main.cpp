@@ -282,18 +282,27 @@ int main(int argc, char *argv[])
                     double linkMaxSpeed = 0.0;
                     int notch = 0;
 
+                    // Direction-aware grade: the link's grade map holds
+                    // {fromNode: +g, toNode: -g}; the physics indexes it with the
+                    // node the tip last passed (previousNodeID). Using begin()
+                    // (lowest node id) is only correct for ascending-id travel —
+                    // on a return trip (e.g. path 1500→1) it inverts the sign.
+                    const auto directionalGrade =
+                        [&train](const std::map<int, double> &gmap) -> double {
+                        if (gmap.empty()) { return 0.0; }
+                        const auto it = gmap.find(train->previousNodeID);
+                        return (it != gmap.end()) ? it->second
+                                                  : gmap.begin()->second;
+                    };
+
                     if (train->currentFirstLink != nullptr) {
-                        if (!train->currentFirstLink->grade.empty()) {
-                            grade = train->currentFirstLink->grade.begin()->second;
-                        }
+                        grade = directionalGrade(train->currentFirstLink->grade);
                         curvature = train->currentFirstLink->curvature;
                         linkMaxSpeed = train->currentFirstLink->freeFlowSpeed;
                     } else if (!train->currentLinks.empty()) {
                         auto fallbackLink = train->currentLinks.front();
                         if (fallbackLink != nullptr) {
-                            if (!fallbackLink->grade.empty()) {
-                                grade = fallbackLink->grade.begin()->second;
-                            }
+                            grade = directionalGrade(fallbackLink->grade);
                             curvature = fallbackLink->curvature;
                             linkMaxSpeed = fallbackLink->freeFlowSpeed;
                         }

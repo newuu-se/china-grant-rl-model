@@ -365,6 +365,44 @@ at the cost of ~11 min more trip time. (Old spiky-data value was 6,023 s /
 | 7 | + smoothness penalty + lower entropy | deterministic **~constant notch 3: 834 kWh / 6,337 s (on-schedule)** | **eco-optimal operating point**; clean/smooth/deployable; ~8.6% below flat-out, ~6% below NeTrainSim driver |
 | 8 | obs/data bug-fix pass (clean grades, unclipped grade/energy obs, time features, obs 7→9) | constant ent_coef → policy stayed **uniform** (loss/ent ≈ ln 9 all run); argmax notch 0, timeout | fixes necessary but exposed: entropy gradient > advantage gradient |
 | 9 | + entropy anneal 0.004→0 by ep 70 | best −2323 (ep 84); sampled **800.2 kWh / 6,708 s**, mode n2 + n6/8 kicks; argmax = const n2 (758 kWh, 31% late) | sharpest policy yet; const n3 still Pareto-dominates → raise lateness price (W_PACE) next |
+| 10 | 2× budget: 200 epochs, anneal→0 by ep 140 (both trips) | fwd best −2254 (ep 196); sampled **790.0 kWh / 6,417 s ON-SCHEDULE = frontier parity** (interp. frontier ≈790.8); argmax const n1 (timeout). Return best −620 (ep 179); sampled ~const n1: 169.6 kWh but 8.9% late; argmax const n1 (18% late) | sampled fwd policy matches constant-notch selection on schedule — first time; argmax still parks 1 notch below feasible on both trips → W_PACE too low remains the blocker |
+
+### 7.5 Return trip — Ho'jakent → Toshkent (B→A, added 2026-06-11)
+New scenario: `data/netrainsim_v2/train_return.dat` (path 1500→1, same consist),
+trained by `rl/train_return.py` (shared `run_training`), evaluated with
+`rl/evaluate.py --return-trip`; outputs in `results/return/`, checkpoints in
+`checkpoints/return/`. A direction bug had to be fixed first: the interactive
+state emission took `grade.begin()` (always the forward-direction entry), so
+the *observation* — not the physics, which resolves direction via path order
+(`simulator.cpp:365-373`) — would have shown inverted grade signs on the return
+trip. Verified post-fix: emitted grade == −(file grade) along the route, and the
+forward trip is regression-identical.
+
+Constant-notch frontier (net −346.6 m descent — far cheaper than forward):
+| Notch | Trip time (s) | Energy (kWh) | On schedule (≤6,500 s)? |
+|---|---|---|---|
+| 8 | 5,605 | 348.3 | yes |
+| 6 | 5,641 | 335.8 | yes |
+| 5 | 5,682 | 327.4 | yes |
+| 4 | 5,768 | 317.7 | yes |
+| 3 | 5,950 | 293.9 | yes |
+| **2** | **6,375** | **242.2** | **yes (eco optimum)** |
+| 1 | 7,681 | 170.1 | no (18% late) |
+
+RL run (same hyperparameters, 14.1 min, 901/901 arrivals): best reward
+**−906.2 at epoch 100** — still improving when training ended. Deterministic
+argmax = clean **constant notch 4 (317.7 kWh / 5,768 s, on-schedule)**;
+stochastic ≈ same (319.7 / 5,827, mode n4). Not yet eco-optimal: the optimizer
+was still descending the notch ladder when MAX_EPOCH hit. Entropy also stayed
+high (2.03 vs 0.68 forward) — downhill, adjacent notches differ little.
+
+**200-epoch rerun (anneal→0 by ep 140):** best **−620 (ep 179)**; the descent
+continued *past* the eco point into the under-paced basin: sampled ≈ constant
+n1 with rare kicks (**169.6 kWh but 7,076 s = 8.9% late**), argmax = const n1
+(170.1 kWh / 7,681 s, 18% late). Same calibration conclusion as the forward
+trip: at `W_PACE=2` the n2→n1 energy saving (72 kWh ≈ 216 reward) is not
+decisively beaten by the lateness cost it incurs, so the mode settles below
+the schedule-feasible point. Raise `W_PACE` for on-schedule convergence.
 
 ### 7.4 Figures (`results/plots/`, regenerate with `python rl/make_plots.py`)
 - **`energy_time_tradeoff.png`** — constant-notch Pareto frontier (colored by notch)
@@ -448,12 +486,12 @@ of superseded runs are archived under `checkpoints/archive_*`.
 
 ---
 
-*Status: iterations 0–9 complete. 2026-06-11: data cleaned (DEM spikes), observation
-de-clipped + schedule features added (7→9), entropy annealing added. Best-ever reward
-−2323 (run 2, ep 84, `checkpoints/policy_best.pth`): sampled = 800 kWh / 6,708 s with a
-sharp mode-n2 + kicks profile; argmax = constant n2 (758 kWh) but 31% late. Constant n3
-(789 kWh / 6,442 s, on-time) still Pareto-dominates the learned policy — the gap is now
-reward calibration (lateness priced too cheaply at `W_PACE=2`), no longer optimization or
-observability. Next: raise `W_PACE`, re-train, and re-ask whether terrain-aware modulation
-can beat constant-notch selection on this corridor now that the agent can actually see the
-terrain and the clock.*
+*Status: iterations 0–10 complete (incl. the B→A return trip). High-water mark
+(200-epoch forward run, `policy_best.pth` ep 196): the sampled policy reaches
+**on-schedule frontier parity — 790.0 kWh / 6,417 s**, within ~1 kWh of the
+interpolated constant-notch frontier, with a modulated (mode-n1 + kicks) profile.
+The return trip converged past its eco point into "cheap but late" (169.6 kWh,
+8.9% late). The one remaining systematic defect, seen on both trips: the policy
+mode settles one notch below the schedule-feasible point because `W_PACE=2`
+prices lateness too cheaply. Next experiment: `W_PACE` 2→4–6 on both trips;
+then re-ask whether terrain-aware modulation can move *below* the frontier.*

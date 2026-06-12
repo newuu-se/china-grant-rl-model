@@ -1,0 +1,642 @@
+% =====================================================================
+%  Energy-Efficient Train Driving via Simulator-in-the-Loop Deep RL
+%  DRAFT — compiles with pdfLaTeX on Overleaf (no external .bib needed)
+%
+%  Search for \todo{...} to find the places that need the author's input
+%  (affiliation, grant number, one citation to verify, etc.)
+% =====================================================================
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage[colorlinks=true,linkcolor=blue!60!black,citecolor=blue!60!black,urlcolor=blue!60!black]{hyperref}
+
+\graphicspath{{figures/}}
+
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+% text-mode safe (used both in prose and after inline math)
+\newcommand{\kwh}{\,kWh}
+
+\title{Energy-Efficient Train Driving on the Toshkent--Ho'jakent Line via
+Simulator-in-the-Loop Deep Reinforcement Learning}
+
+\author{%
+  Asilbek Boboyev\\
+  \todo{affiliation, department, city, country}\\
+  \texttt{asilbekboboyev98@gmail.com}
+}
+\date{June 2026 --- working draft}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We study energy-efficient driving of an ER9E electric multiple unit on the
+74.9\,km Toshkent--Ho'jakent line using deep reinforcement learning (RL)
+coupled, step by step, to a modified version of the NeTrainSim train
+dynamics simulator. The simulator is adapted to regional (GOST-based)
+resistance formulas, regenerative braking is disabled, and an interactive
+JSON bridge gives the learning agent true per-second control of the
+locomotive throttle notch. A Proximal Policy Optimization (PPO) agent
+selects one of nine notch settings every 15 simulated seconds to minimize
+trip energy subject to a 6{,}500\,s schedule deadline. We report the
+complete diagnosis chain required to make this work: (i)~elevation noise in
+the route data produced physically impossible grades of up to $\pm17\%$ that
+broke the simulator's force balance and corrupted its energy accounting,
+which we repair with an elevation-preserving median filter; (ii)~stale
+observation normalization silently clipped the gradient and power features
+the agent needed; (iii)~a schedule-dependent reward without a clock in the
+observation made the reward non-Markovian; and (iv)~a constant entropy bonus
+kept the policy pinned at the uniform distribution, which we resolve with
+linear entropy annealing. With all repairs in place, the learned stochastic
+policy attains \emph{on-schedule parity with the constant-notch Pareto
+frontier} (790.0\kwh{} in 6{,}417\,s, within $\sim$1\kwh{} of the
+interpolated frontier), uses 6.9\% less energy than the simulator's native
+driver, and 8.4\% less than flat-out driving. On the descending return trip
+the agent finds very low-energy but slightly late solutions (169.6\kwh,
+8.9\% late), exposing a remaining reward-calibration issue: lateness priced
+too cheaply causes the policy mode to settle one notch below the
+schedule-feasible optimum. We characterize both trips' energy--time
+frontiers, quantify every failure mode, and outline the calibration fix.
+The study doubles as a practical checklist for simulator-in-the-loop RL on
+long-horizon control problems.
+\end{abstract}
+
+% =====================================================================
+\section{Introduction}
+% =====================================================================
+
+Railway traction is one of the largest electricity consumers in many
+national grids, and the driving style of a train over a fixed route with a
+fixed timetable is a classical lever for reducing that consumption: between
+the fastest feasible trip and the slowest schedule-feasible one lies an
+energy--time trade-off that a skilled driver (or an automatic train
+operation system) can exploit~\cite{scheepmaker2017,howlett1995,yin2017}.
+Classical approaches derive optimal driving regimes (maximum acceleration,
+cruising, coasting, braking) from optimal-control theory. Deep
+reinforcement learning offers a complementary, model-free route: if a
+high-fidelity simulator of the train and route exists, an agent can learn
+the energy-optimal throttle policy directly from interaction, without
+hand-deriving switching points, and can in principle adapt to terrain,
+speed-limit structure, and schedule slack simultaneously.
+
+This paper reports a complete, honest account of building such a system for
+a concrete regional case: the Toshkent--Ho'jakent line in Uzbekistan
+(74.9\,km, 40--80\,km/h speed zones, net climb of 347\,m), operated by an
+ER9E electric multiple unit. Our contributions are:
+
+\begin{enumerate}
+  \item \textbf{A simulator-in-the-loop RL pipeline.} We extend the
+  open-source NeTrainSim freight simulator~\cite{aredah2024} with
+  (a)~GOST-based resistance physics appropriate to the region,
+  (b)~removal of regenerative braking to match the studied rolling stock,
+  and (c)~an interactive stdin/stdout JSON protocol that lets a Gymnasium
+  environment drive the C++ physics one second at a time, bypassing the
+  simulator's built-in driver and optimizer.
+
+  \item \textbf{Route-data repair.} The digital elevation model behind the
+  route data contained single-node errors producing grades up to $\pm17\%$
+  on 50\,m segments---physically impossible for rail, sufficient to break
+  the simulator's force balance, and inflating its energy accounting by a
+  factor of three at the affected links. We repair the profile with an
+  elevation-preserving median filter and re-measure all baselines on the
+  cleaned data (Section~\ref{sec:data}).
+
+  \item \textbf{A reproducible diagnosis chain for long-horizon RL.} We
+  document four distinct failure modes encountered on the way to a working
+  agent---observation saturation, a non-Markovian schedule reward, an
+  exploration--commitment deadlock under a constant entropy bonus, and
+  lateness underpricing---together with the measurements that exposed each
+  one (Section~\ref{sec:results}).
+
+  \item \textbf{Quantified results on both directions of the line.} The
+  final forward-trip policy reaches the constant-notch energy--time Pareto
+  frontier \emph{on schedule} (790.0\kwh{} / 6{,}417\,s), beating the
+  simulator's native driver by 6.9\% and flat-out driving by 8.4\%. We
+  further characterize the descending return trip, where the same recipe
+  converges to very low energy (169.6\kwh) at the cost of an 8.9\% deadline
+  violation---isolating reward calibration, not optimization, as the last
+  open problem (Section~\ref{sec:discussion}).
+\end{enumerate}
+
+We deliberately report what the agent does \emph{not} yet achieve: it
+matches, but does not move below, the constant-notch frontier; and its
+greedy (argmax) mode systematically settles one notch below the
+schedule-feasible optimum. Both observations come with a quantitative
+explanation and a concrete fix.
+
+% =====================================================================
+\section{System and Methods}
+% =====================================================================
+
+\subsection{Simulator and physics modifications}
+\label{sec:simulator}
+
+NeTrainSim~\cite{aredah2024} is an open-source C++/Qt network train
+simulator that integrates longitudinal train dynamics (tractive effort
+vs.\ resistance, adhesion-limited) at a configurable time step, here
+1\,s. We modified it in three ways.
+
+\paragraph{GOST-based resistance.} The original Davis-type resistance in
+US units is replaced by the SI specific-resistance form used in regional
+(GOST) railway practice. For a vehicle of mass $m$ tonnes at speed $v$
+km/h, the running resistance in newtons is
+\begin{equation}
+R \;=\; \underbrace{\bigl(1.1 + 0.01\,v + 0.000227\,v^2\bigr)}_{w_0\ \mathrm{[N/kN]}}\, W
+\;+\; \underbrace{10\, i_{\%}}_{\mathrm{grade\ [N/kN]}}\, W
+\;+\; \underbrace{\frac{700}{1746.4}\,|c^{\circ}|}_{\mathrm{curve\ [N/kN]}}\, W,
+\qquad W = 9.81\, m \ \mathrm{[kN]},
+\label{eq:resistance}
+\end{equation}
+where $i_{\%}$ is the gradient in percent (the factor 10 converts to
+per-mille, the unit of the GOST grade term) and the curve term implements
+$w_r = 700/R_c$ with curve radius $R_c = 1746.4/c^{\circ}$ derived from the
+curvature in degrees of arc.\footnote{The unit of the curvature column in
+the source data could not be independently confirmed; with the recorded
+maximum of $0.54^{\circ}$ the implied minimum radius is $\sim$3.2\,km and
+the curve term is everywhere small. \todo{confirm curvature unit with the
+data provider.}}
+
+\paragraph{No regenerative braking.} The studied configuration does not
+recover braking energy; the simulator's regeneration path is disabled
+(regenerative efficiency $\equiv 0$), making braking purely dissipative.
+
+\paragraph{Interactive RL bridge.} In interactive mode
+(\texttt{-I}), the binary executes a loop: read a JSON action
+$\{\texttt{notch}\,{:}\,u\}$ from stdin $\rightarrow$ override every
+locomotive's throttle with the quadratic notch map
+$\lambda = (u/8)^2$ $\rightarrow$ advance the physics one second
+$\rightarrow$ write the train state (speed, position, directional grade and
+curvature at the head, per-step energy, link speed limit, arrival flag) as
+one JSON line to stdout. The override bypasses both the built-in A$^*$
+speed optimizer and the discretized throttle governor, so the agent's
+action is the throttle physically applied. One subtlety matters for
+bidirectional use: each link stores both directional gradients
+$\{+i, -i\}$ and the physics resolves the correct sign from the traversal
+order of the train's path; the state emission must use the same
+direction-aware lookup, otherwise observations on a reversed path carry
+inverted gradient signs while the physics remains correct.
+
+\subsection{Route, rolling stock, and data repair}
+\label{sec:data}
+
+\begin{table}[t]
+\centering\small
+\caption{Route and rolling-stock configuration.}
+\label{tab:setup}
+\begin{tabular}{ll}
+\toprule
+Route & Toshkent $\rightarrow$ Ho'jakent, 74.891\,km, 1{,}500 nodes / 1{,}499 links ($\approx$50\,m each) \\
+Speed zones & 31.0\,km @ 40, 15.6\,km @ 60, 4.0\,km @ 70, 24.3\,km @ 80\,km/h \\
+Net elevation & $+346.6$\,m (forward); $-346.6$\,m (return) \\
+Train & ER9E EMU: 3 powered cars (1{,}213\,kW, 60\,t each) + 3 trailers; total 373\,t \\
+Adhesion & friction coefficient 0.25 ($\approx$441\,kN tractive limit) \\
+Control & notch $u \in \{0,\dots,8\}$, throttle $\lambda=(u/8)^2$, held 15\,s per decision \\
+Schedule & deadline $T_d = 6{,}500$\,s; physical floor $\approx$5{,}025\,s (speed-limit bound) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:setup} summarizes the configuration. The route's grade
+column, derived from a digital elevation model, contained isolated
+single-node errors with a characteristic signature: adjacent
+opposite-sign grade pairs of up to $-12.4\%$/$+17.0\%$ on consecutive 50\,m
+segments (e.g.\ links 887/888). Real rail grades rarely exceed 3--4\%.
+These spikes are not merely cosmetic. At $+17\%$ the grade resistance of
+the 373\,t consist ($\approx$620\,kN) exceeds the train's total adhesion
+limit ($\approx$441\,kN), the simulator's smoothed acceleration no longer
+satisfies force balance, and its energy accounting---which charges the
+\emph{virtual} tractive power $(m a + R)\,v$---records up to
+3.76\kwh{} in a single second, an implied 11.8\,MW from a consist with
+3.64\,MW installed.
+
+We repair the data in elevation space: integrate the grades into an
+elevation profile, apply three passes of a window-3 median filter (which
+removes isolated spikes exactly while leaving monotone slopes untouched)
+plus one light moving-average pass on interior nodes with both endpoints
+pinned, and re-derive the grades. The net climb is preserved bit-for-bit
+(346.619\,m); the grade range contracts from $[-12.4, +17.0]\%$ to
+$[-2.7, +4.5]\%$; the per-second energy maximum falls from 3.76 to
+1.39\kwh{} (a notch-8 acceleration transient, within installed power).
+Figure~\ref{fig:cleaning} shows the raw and repaired profiles. All
+baselines and results below use the repaired data.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=.92\linewidth]{fig_data_cleaning.png}
+\caption{Elevation-noise repair. Top: elevation profile integrated from the
+raw grades (red) and after median filtering (blue); endpoints are pinned so
+the net climb of 346.6\,m is preserved exactly. Bottom: the corresponding
+grade sequences; raw spikes reach $\pm$12--17\% on 50\,m segments,
+physically impossible for rail and sufficient to break the simulator's
+force balance.}
+\label{fig:cleaning}
+\end{figure}
+
+\subsection{Markov decision process formulation}
+\label{sec:mdp}
+
+\paragraph{Observation (9 features, all normalized).} Speed
+$v/22.22$, position $x/L$, directional grade $i/4.5$, curvature,
+remaining distance $(L-x)/L$, per-step energy $E_t/1.5$, link speed limit
+$v_{\lim}/22.22$, elapsed-time fraction $\tau = t/T_d$, and
+\emph{behind-schedule fraction}
+\begin{equation}
+\beta_t \;=\; \max\!\Bigl(0,\ \tfrac{t}{T_d}L - x_t\Bigr)\big/ L .
+\end{equation}
+The last two features are essential, not cosmetic: the reward below depends
+on the step counter, so an agent without a clock in its observation faces a
+non-Markovian reward it cannot learn to predict
+(Section~\ref{sec:results}). Equally essential are the normalization
+denominators: earlier values calibrated to a previous dataset clipped the
+grade feature to a sign bit on 27\% of the route and saturated the energy
+feature at 17\% of its true range---the agent was blind to precisely the
+terrain and power information that terrain-aware driving requires.
+
+\paragraph{Action.} One of nine notch settings, held for 15 consecutive
+simulator seconds (action repeat). The decision horizon of an episode drops
+from $\sim$6{,}500 one-second choices to $\sim$430, which we found necessary
+for credit assignment over the trip-length energy sum; with one-second
+decisions every reward design we tried collapsed to a near-constant notch.
+
+\paragraph{Reward.} Per simulated second $t$ (summed over the 15\,s
+decision), with one smoothness term per decision:
+\begin{equation}
+r_t \;=\; -\,w_E\, E_t \;-\; w_P\, \beta_t \;-\; w_V \max(0,\, v_t - v_{\lim})
+\;\;\underbrace{-\; w_S\, |\Delta u|}_{\text{per decision}}
+\;+\;
+\begin{cases}
++B_{\mathrm{arr}} & \text{on arrival},\\[2pt]
+-B_{\mathrm{to}} & \text{on timeout},
+\end{cases}
+\label{eq:reward}
+\end{equation}
+with $w_E{=}3$ per kWh, $w_P{=}2$, $w_V{=}1$, $w_S{=}0.15$,
+$B_{\mathrm{arr}}{=}200$, $B_{\mathrm{to}}{=}1500$ (timeout at 12{,}000\,s).
+The pace penalty $w_P \beta_t$ is zero whenever the train is on or ahead of
+the uniform deadline pace, so coasting is free where slack exists and
+lagging is penalized immediately; a terminal-only lateness fee is provably
+ineffective here because, over a $\sim$6{,}000-step episode, an immediate
+per-step energy saving dominates any discounted end-of-trip penalty.
+
+\paragraph{Why near-undiscounted.} The objective is a $\sim$6{,}000-step
+energy \emph{sum}; with $\gamma \le 0.999$ the discounting itself distorts
+the sum toward ``finish sooner'' (high notch). We use $\gamma = 0.9999$
+(effective horizon $\sim$10$^4$ steps) with return normalization for value
+stability.
+
+\subsection{Learning setup}
+
+\begin{table}[t]
+\centering\small
+\caption{PPO hyperparameters (Tianshou 0.5.1~\cite{weng2022tianshou},
+Gymnasium environment~\cite{towers2024gymnasium}).}
+\label{tab:hyper}
+\begin{tabular}{llll}
+\toprule
+Algorithm & PPO~\cite{schulman2017ppo}, separate actor/critic & Discount $\gamma$ & 0.9999 \\
+Networks & MLP $[256,128,64]$ & GAE $\lambda$~\cite{schulman2016gae} & 0.95 \\
+Optimizer & Adam, lr $3\times10^{-4}$ & Clip $\epsilon$ & 0.2 \\
+Parallel envs & 8 (one C++ process each) & Value coef.\ / grad clip & 0.5 / 0.5 \\
+Batch / reuse & 2048 / 4 epochs per collect & Adv.\ + return norm. & on / on \\
+Episodes per collect & 8 (full episodes) & Entropy coef. & $0.004 \to 0$ linearly by ep.\ 140 \\
+Budget & 200 epochs ($\approx$1{,}600 episodes, $\sim$37\,min) & Checkpointing & best test reward \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:hyper} lists the final configuration. One element deserves
+emphasis: \textbf{entropy annealing}. With a constant entropy coefficient
+(0.004), the policy never left the uniform distribution over 100 epochs
+(policy entropy $\approx \ln 9 = 2.197$ throughout; flat action histogram;
+the argmax parked at notch~0 and timed out): the entropy gradient exceeded
+the tiny per-decision advantage gradient that a 15-second notch choice
+exerts on a $\sim$2{,}500-unit episode return. Annealing the coefficient
+linearly to zero lets early exploration give way to commitment; entropy
+then falls (to 1.24 forward, 0.33 return at 200 epochs) and test rewards
+improve monotonically (Figure~\ref{fig:training}).
+
+% =====================================================================
+\section{Results}
+\label{sec:results}
+% =====================================================================
+
+\subsection{Constant-notch frontiers and built-in driver}
+
+\begin{table}[t]
+\centering\small
+\caption{Constant-notch baselines on the repaired data (measured through
+the interactive simulator). Bold = lowest-energy schedule-feasible constant
+policy (the ``eco target''). The native NeTrainSim driver is shown for the
+forward trip.}
+\label{tab:frontier}
+\begin{tabular}{c rr c rr}
+\toprule
+& \multicolumn{2}{c}{Forward (climb $+347$\,m)} & \hspace{4mm} & \multicolumn{2}{c}{Return (descent $-347$\,m)} \\
+\cmidrule{2-3}\cmidrule{5-6}
+Notch & time (s) & energy (kWh) & & time (s) & energy (kWh) \\
+\midrule
+8 & 5{,}602 & 862.4 & & 5{,}605 & 348.3 \\
+6 & 5{,}652 & 853.5 & & 5{,}641 & 335.8 \\
+5 & 5{,}721 & 849.1 & & 5{,}682 & 327.4 \\
+4 & 5{,}910 & 834.4 & & 5{,}768 & 317.7 \\
+3 & \textbf{6{,}442} & \textbf{788.6} & & 5{,}950 & 293.9 \\
+2 & 8{,}492$^{\dagger}$ & 758.4 & & \textbf{6{,}375} & \textbf{242.2} \\
+1 & --- & --- & & 7{,}681$^{\dagger}$ & 170.1 \\
+\midrule
+\multicolumn{3}{l}{Native driver: 6{,}038\,s / 848.2\kwh} & & & \\
+\bottomrule
+\multicolumn{6}{l}{\footnotesize $^{\dagger}$misses the 6{,}500\,s deadline.}
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:frontier} gives the energy--time Pareto frontiers obtained
+by driving each constant notch to completion. Three observations frame
+everything that follows. First, the frontier is shallow at the top and
+steep at the bottom: between notch 8 and notch 4 the forward trip saves
+only 28\kwh{} for 308\,s; between notch 4 and notch 3 it saves 46\kwh{}
+for another 532\,s. Second, the schedule deadline of 6{,}500\,s makes
+constant notch~3 (forward) and notch~2 (return) the eco targets: the
+slowest constant policies that still arrive on time. Third, NeTrainSim's
+own driver---which varies notch along the route---lands \emph{above} the
+frontier (848.2\kwh{} at 6{,}038\,s, more energy than constant notch~4 at
+comparable time): varied driving is not automatically better driving.
+
+\subsection{The diagnosis chain}
+
+Table~\ref{tab:runs} summarizes the training runs. Three failure modes had
+to be identified and removed before any meaningful learning occurred; each
+is documented here because the symptoms are generic to long-horizon,
+simulator-in-the-loop RL.
+
+\begin{table}[t]
+\centering\small
+\caption{Training-run summary (all on repaired data, 9-feature
+observation). ``Sampled'' rollouts draw from the policy distribution (the
+behavior the test rewards measure); ``argmax'' is the deterministic mode.}
+\label{tab:runs}
+\begin{tabular}{llllll}
+\toprule
+Run & Trip & Best reward & Sampled rollout & Argmax rollout & Diagnosis \\
+\midrule
+A (100 ep, const.\ ent.) & fwd & $-2470$ & uniform histogram & N0, timeout & entropy pinned at $\ln 9$ \\
+B (100 ep, annealed) & fwd & $-2323$ & 800.2\kwh, 6{,}708\,s & const.\ N2, 31\% late & sharp but late \\
+C (200 ep, annealed) & fwd & $-2254$ & \textbf{790.0\kwh, 6{,}417\,s} & const.\ N1, timeout & \textbf{frontier parity} \\
+\midrule
+D (100 ep, annealed) & ret & $-906$ & 319.7\kwh, 5{,}827\,s & const.\ N4, on time & still descending \\
+E (200 ep, annealed) & ret & $-620$ & 169.6\kwh, 7{,}076\,s & const.\ N1, 18\% late & overshot deadline \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{(i) Observation saturation.} Before this study's repairs, the
+grade feature was normalized by a stale constant ($0.7\%$) appropriate to an
+earlier dataset. With real grades up to $\pm4.5\%$ (clean) the feature
+clipped to $\pm1$ on 27\% of the route: a 1\% and a 4\% climb were
+indistinguishable. The per-step energy feature similarly saturated at
+0.25\kwh{} against a true maximum of 1.39\kwh. No terrain-aware policy is
+learnable when the policy cannot see terrain magnitude; conclusions drawn
+about RL's limits before such audits are unreliable.
+
+\paragraph{(ii) Non-Markovian reward.} The pace penalty in
+Eq.~\eqref{eq:reward} depends on the elapsed step count, which was
+originally absent from the observation. The critic then faces targets it
+cannot predict from its inputs, and the policy cannot condition on schedule
+slack---the precise capability the problem demands. Adding $\tau$ and
+$\beta$ to the observation restored the Markov property.
+
+\paragraph{(iii) Exploration--commitment deadlock.} Run~A
+(Table~\ref{tab:runs}): with a constant entropy bonus the policy remained
+\emph{exactly uniform} for 100 epochs while still earning $-2470$ (uniform
+random notches average out to a feasible pace). Sampled behavior masked the
+defect; only the argmax (notch 0, timeout) and the entropy trace exposed
+it. Linear annealing (Section~\ref{sec:mdp}) resolved the deadlock without
+sacrificing early exploration: run~B improved the best reward by 147 units
+and produced the first sharp, usable policy.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=.95\linewidth]{fig_training_curves.png}
+\caption{Training curves for the 200-epoch runs (left: forward; right:
+return). Test rewards are single sampled episodes; the dotted line marks
+the epoch at which the entropy coefficient reaches zero. Both runs improve
+through the annealed phase; the forward run peaks at $-2254$ (epoch 196),
+the return run at $-620$ (epoch 179).}
+\label{fig:training}
+\end{figure}
+
+\subsection{Forward trip: on-schedule frontier parity}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=.8\linewidth]{fig_tradeoff_forward.png}
+\caption{Forward trip: constant-notch frontier (colored by notch), the
+native NeTrainSim driver (red diamond), and the learned sampled policy
+(orange star) at 790.0\kwh{} / 6{,}417\,s --- on schedule and within
+$\sim$1\kwh{} of the interpolated frontier.}
+\label{fig:tradeoff_fwd}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=.9\linewidth]{fig_profile_forward.png}
+\caption{Learned forward policy (sampled) along the route: speed vs.\
+limit, notch sequence, and gradient. The policy idles at low notch and
+applies short higher-notch efforts, keeping deadline pace.}
+\label{fig:profile_fwd}
+\end{figure}
+
+The 200-epoch forward policy (run~C) reaches \textbf{790.0\kwh{} in
+6{,}417\,s} when sampled---83\,s inside the deadline. Linear interpolation
+of the constant-notch frontier at 6{,}417\,s gives 790.8\kwh: the learned
+policy sits on the frontier to within measurement noise
+(Figure~\ref{fig:tradeoff_fwd}). Against fixed references this is
+\textbf{8.4\% less energy than flat-out driving} (notch 8, 862.4\kwh) and
+\textbf{6.9\% less than the simulator's native driver} (848.2\kwh), while
+arriving on schedule. The notch profile (Figure~\ref{fig:profile_fwd})
+shows a low-notch base with selective bursts---consistent with the
+shallow-top/steep-bottom structure of the frontier, which rewards spending
+time at low notch and buying pace in short, efficient efforts.
+
+Two caveats are part of the honest record. The policy \emph{matches} the
+frontier; it does not yet move below it---on this route, with this
+resistance model, sub-trip terrain modulation appears to offer little
+energy beyond what constant-notch selection already captures, a finding
+corroborated by the native varied-notch driver sitting \emph{above} the
+frontier. Second, the deterministic argmax of run~C collapses to constant
+notch~1 and times out; the sampled policy is the deployable artifact, and
+the argmax pathology is analyzed next.
+
+\subsection{Return trip and the lateness-pricing defect}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=.8\linewidth]{fig_tradeoff_return.png}
+\caption{Return trip: frontier, deadline, and RL outcomes. The 100-epoch
+argmax (red diamond) lands exactly on constant notch 4, on schedule; the
+200-epoch sampled policy (orange star) descends past the eco point into
+cheap-but-late territory (169.6\kwh, 8.9\% late).}
+\label{fig:tradeoff_ret}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=.9\linewidth]{fig_profile_return.png}
+\caption{Return-trip sampled policy: near-constant notch 1 with sparse
+corrective bursts on the $-347$\,m net descent.}
+\label{fig:profile_ret}
+\end{figure}
+
+The descending return trip is far cheaper everywhere
+(Table~\ref{tab:frontier}); its eco target is constant notch~2
+(242.2\kwh{} / 6{,}375\,s). At 100 epochs (run~D) the argmax is a clean,
+on-schedule constant notch~4 (317.7\kwh)---correct side of the deadline,
+two notches above the optimum, and still improving when the budget ended.
+Doubling the budget (run~E) continued the descent \emph{past} the eco
+point: the sampled policy settles at near-constant notch~1
+(Figure~\ref{fig:profile_ret}), spending 169.6\kwh{} but arriving 576\,s
+(8.9\%) late; the argmax is constant notch~1 at 18\% late
+(Figure~\ref{fig:tradeoff_ret}).
+
+This is not an optimization failure---reward increased monotonically and
+the policy is sharp---but a \emph{pricing} defect in
+Eq.~\eqref{eq:reward}. Descending one notch from the eco point saves
+$\sim$72\kwh{} ($216$ reward units at $w_E{=}3$) on the return trip, while
+the pace penalty it incurs at $w_P{=}2$ is of comparable magnitude; the
+optimum of the \emph{reward} therefore sits slightly below the deadline
+pace even though the \emph{intended} optimum is on it. The same mechanism
+explains every argmax pathology in Table~\ref{tab:runs}: the mode of the
+policy settles at the energy floor of the reward-viable region, one notch
+below schedule-feasible, while sampling noise supplies the missing pace.
+The fix is a calibration, not a redesign: raise $w_P$ until the marginal
+lateness cost strictly dominates the marginal one-notch energy saving on
+both trips ($w_P \gtrsim 4$--$6$ by the arithmetic above), or impose the
+deadline as a hard constraint (e.g.\ via a large terminal penalty scaled by
+lateness \emph{and} a per-step pace term). We leave the retrained result to
+the final version of this paper. \todo{run $w_P$ ablation and update}
+
+% =====================================================================
+\section{Discussion and limitations}
+\label{sec:discussion}
+% =====================================================================
+
+\paragraph{What generalizes.} The four failure modes we document---data
+artifacts that silently break simulator physics, observation normalization
+drift, schedule rewards without clocks in the observation, and entropy
+bonuses that overpower weak per-decision advantages---are not specific to
+trains. Any simulator-in-the-loop RL project with long horizons and
+hand-maintained input data is exposed to all four, and each has a cheap,
+specific audit: integrate and plot derived physical profiles; histogram
+each observation feature against its bounds; check reward terms for
+dependence on state outside the observation; and track policy entropy
+against $\ln |\mathcal{A}|$.
+
+\paragraph{Energy accounting under force-balance violation.} NeTrainSim
+charges energy from virtual tractive power $(ma + R)v$. When data errors
+make $R$ exceed the adhesion limit, recorded power can exceed installed
+power several-fold. After data repair the maximum per-second energy
+(1.39\kwh) is consistent with installed power and transmission efficiency.
+Simulation studies that aggregate energy over routes with unaudited grade
+data inherit this risk.
+
+\paragraph{Limitations.} (i)~Results are single-route, single-consist, and
+in-simulator; no field validation is claimed. (ii)~The curvature unit in
+the source data is unverified (footnote, Section~\ref{sec:simulator});
+the curve resistance term is small under either plausible reading.
+(iii)~The deterministic argmax is currently unusable on both trips; we
+present sampled rollouts and have identified the calibration cause.
+(iv)~Regenerative braking is excluded by design for the studied stock; on
+the $-347$\,m return trip regeneration would change conclusions
+substantially. (v)~The 15\,s action repeat that makes credit assignment
+tractable also lower-bounds how finely the policy can modulate; whether
+1--5\,s control with a hierarchical or reward-shaped scheme can move
+\emph{below} the frontier remains open.
+
+% =====================================================================
+\section{Conclusion}
+% =====================================================================
+
+We built and audited an end-to-end pipeline that couples PPO to a modified
+NeTrainSim with true per-second throttle control, repaired the route data
+it depends on, and trained driving policies for both directions of the
+Toshkent--Ho'jakent line. The forward-trip policy attains on-schedule
+parity with the constant-notch Pareto frontier (790.0\kwh{} / 6{,}417\,s;
+$-8.4\%$ vs.\ flat-out, $-6.9\%$ vs.\ the simulator's native driver), and
+the complete diagnosis chain---data repair, observation audit, Markov
+repair, entropy annealing, lateness pricing---is documented with
+measurements at every step. The remaining gap between the learned mode and
+the schedule-feasible optimum is a one-parameter reward calibration with a
+known arithmetic, not an open-ended search. Beyond the specific line, the
+study functions as a practical checklist for applying long-horizon RL
+through imperfect simulators on imperfect data.
+
+\paragraph{Future work.} (1)~Raise the lateness price ($w_P$) and report
+on-schedule convergence on both trips; (2)~regeneration-enabled stock on
+the descending direction; (3)~finer control intervals with hierarchical
+policies to probe for below-frontier terrain modulation; (4)~robustness to
+consist mass and timetable perturbations; (5)~field data calibration of
+the GOST coefficients and the curvature unit.
+
+% =====================================================================
+\section*{Acknowledgments}
+\todo{Grant acknowledgment --- e.g.\ ``This work was supported by ... (China
+grant no.\ XXX).'' Add collaborators/supervisor as appropriate.}
+
+% =====================================================================
+\begin{thebibliography}{9}\small
+
+\bibitem{scheepmaker2017}
+G.~M. Scheepmaker, R.~M.~P. Goverde, and L.~G. Kroon,
+``Review of energy-efficient train control and timetabling,''
+\emph{European Journal of Operational Research}, vol.~257, no.~2,
+pp.~355--376, 2017.
+
+\bibitem{howlett1995}
+P.~G. Howlett and P.~J. Pudney,
+\emph{Energy-Efficient Train Control}.
+Springer-Verlag, London, 1995.
+
+\bibitem{yin2017}
+J.~Yin, T.~Tang, L.~Yang, J.~Xun, Y.~Huang, and Z.~Gao,
+``Research and development of automatic train operation for railway
+transportation systems: A survey,''
+\emph{Transportation Research Part C: Emerging Technologies}, vol.~85,
+pp.~548--572, 2017.
+
+\bibitem{aredah2024}
+A.~S. Aredah, K.~Fadhloun, and H.~A. Rakha,
+``NeTrainSim: a network-level simulator for modeling freight train energy
+consumption,'' \emph{Railway Engineering Science}, 2024.
+\todo{verify exact volume/pages/year of the NeTrainSim reference}
+
+\bibitem{schulman2017ppo}
+J.~Schulman, F.~Wolski, P.~Dhariwal, A.~Radford, and O.~Klimov,
+``Proximal policy optimization algorithms,''
+arXiv:1707.06347, 2017.
+
+\bibitem{schulman2016gae}
+J.~Schulman, P.~Moritz, S.~Levine, M.~Jordan, and P.~Abbeel,
+``High-dimensional continuous control using generalized advantage
+estimation,'' in \emph{Proc.\ ICLR}, 2016.
+
+\bibitem{weng2022tianshou}
+J.~Weng, H.~Chen, D.~Yan, K.~You, A.~Duburcq, M.~Zhang, Y.~Su, H.~Su, and
+J.~Zhu, ``Tianshou: A highly modularized deep reinforcement learning
+library,'' \emph{Journal of Machine Learning Research}, vol.~23, no.~267,
+pp.~1--6, 2022.
+
+\bibitem{towers2024gymnasium}
+M.~Towers \emph{et al.},
+``Gymnasium: A standard interface for reinforcement learning environments,''
+arXiv:2407.17032, 2024.
+
+\end{thebibliography}
+
+\end{document}

@@ -45,6 +45,10 @@ NODES_FILE  = os.path.join(_REPO, "data", "netrainsim_v2", "nodesFile_v2_fixed.d
 # and 3.76 kWh/s energy spikes). Regenerate with: python data/clean_grade_spikes.py
 LINKS_FILE  = os.path.join(_REPO, "data", "netrainsim_v2", "linksFile_v2_clean.dat")
 TRAINS_FILE = os.path.join(_REPO, "data", "netrainsim_v2", "trainsFile_rl.dat")
+# Return trip (Ho'jakent → Toshkent): identical consist, path reversed (1500→1).
+# Same links/route length; net elevation is DOWNHILL (−346.6 m), so the
+# constant-notch frontier differs — see results/return/baselines.txt.
+TRAINS_FILE_RETURN = os.path.join(_REPO, "data", "netrainsim_v2", "train_return.dat")
 
 TOTAL_ROUTE_LENGTH_M = 74_891.29  # sum of all 1499 link lengths (linksFile_v2_fixed_speed.dat)
 STATE_PREFIX = "NTS_JSON "
@@ -128,8 +132,11 @@ class NeTrainSimEnv(gym.Env):
     )
     action_space = Discrete(9)  # notch 0-8
 
-    def __init__(self):
+    def __init__(self, trains_file: str = TRAINS_FILE):
         super().__init__()
+        # trains_file selects the trip: TRAINS_FILE (A→B) or TRAINS_FILE_RETURN
+        # (B→A, path 1500→1). Route length/links are identical either way.
+        self._trains_file = trains_file
         self._proc: subprocess.Popen | None = None
         self._out_queue: queue.Queue | None = None  # lines from the reader thread
         self._stderr_log = None   # file handle for simulator stderr
@@ -147,7 +154,7 @@ class NeTrainSimEnv(gym.Env):
                 f"Simulator binary not found: {SIMULATOR_BIN}\n"
                 "Run: cd NeTrainSim-adjusted && ./build-linux.sh  (or build-mac.sh on macOS)"
             )
-        for path in (NODES_FILE, LINKS_FILE, TRAINS_FILE):
+        for path in (NODES_FILE, LINKS_FILE, self._trains_file):
             if not os.path.isfile(path):
                 raise FileNotFoundError(
                     f"NeTrainSim input file not found: {path}\n"
@@ -303,7 +310,7 @@ class NeTrainSimEnv(gym.Env):
             [SIMULATOR_BIN,
              "-n", NODES_FILE,
              "-l", LINKS_FILE,
-             "-t", TRAINS_FILE,
+             "-t", self._trains_file,
              "-p", "1.0",
              "-I"],
             stdin=subprocess.PIPE,

@@ -43,9 +43,10 @@ NOTCH = [8, 6, 5, 4, 3, 2]
 STEPS = [5602, 5652, 5721, 5910, 6442, 8492]
 ENERGY = [862.41, 853.46, 849.10, 834.37, 788.63, 758.39]
 # RL eval point — update after each `python rl/evaluate.py` run.
-# Run 2 (2026-06-11, entropy anneal, policy_best ep84), SAMPLED rollout — the
-# representative behavior; the argmax is constant n2 (758 kWh / 8,492 s, late).
-RL_STEPS, RL_ENERGY = 6708, 800.2
+# 200-epoch run (2026-06-11, policy_best ep196), SAMPLED rollout — on-schedule
+# frontier parity: 790.0 kWh @ 6,417 s vs interpolated frontier ≈790.8 kWh.
+# The argmax is constant n1 (timeout) — sampled is the representative behavior.
+RL_STEPS, RL_ENERGY = 6417, 790.0
 RL_LABEL = "RL policy (sampled)"
 
 # ── shared "advanced" styling ────────────────────────────────────────────────

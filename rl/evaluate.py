@@ -22,13 +22,18 @@ import numpy as np
 from tianshou.policy import PPOPolicy
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from rl.train_env import NeTrainSimEnv, NODES_FILE, LINKS_FILE
+from rl.train_env import (NeTrainSimEnv, NODES_FILE, LINKS_FILE,
+                          TRAINS_FILE, TRAINS_FILE_RETURN)
 # Reuse training's policy factory + device so the eval policy can never drift
 # from the trained one (same architecture and hyperparameters).
 from rl.train import build_policy as build_ppo_policy, DEVICE
 
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "results")
-CHECKPOINT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "checkpoints")
+_BASE = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(_BASE, "..", "results")
+CHECKPOINT_DIR = os.path.join(_BASE, "..", "checkpoints")
+# Return trip (B→A): separate checkpoints + outputs (see rl/train_return.py)
+OUTPUT_DIR_RETURN = os.path.join(_BASE, "..", "results", "return")
+CHECKPOINT_DIR_RETURN = os.path.join(_BASE, "..", "checkpoints", "return")
 
 
 def load_path_coordinates() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -71,17 +76,17 @@ def load_path_coordinates() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return np.array(cum), np.array(xs), np.array(ys)
 
 
-def find_latest_checkpoint() -> str:
-    if not os.path.isdir(CHECKPOINT_DIR):
-        raise FileNotFoundError(f"No checkpoints directory found at {CHECKPOINT_DIR}")
-    files = sorted(f for f in os.listdir(CHECKPOINT_DIR) if f.endswith(".pth"))
+def find_latest_checkpoint(checkpoint_dir: str = CHECKPOINT_DIR) -> str:
+    if not os.path.isdir(checkpoint_dir):
+        raise FileNotFoundError(f"No checkpoints directory found at {checkpoint_dir}")
+    files = sorted(f for f in os.listdir(checkpoint_dir) if f.endswith(".pth"))
     if not files:
-        raise FileNotFoundError("No .pth checkpoint files found in checkpoints/")
+        raise FileNotFoundError(f"No .pth checkpoint files found in {checkpoint_dir}")
     if "policy_best.pth" in files:
-        return os.path.join(CHECKPOINT_DIR, "policy_best.pth")
+        return os.path.join(checkpoint_dir, "policy_best.pth")
     if "policy_final.pth" in files:
-        return os.path.join(CHECKPOINT_DIR, "policy_final.pth")
-    return os.path.join(CHECKPOINT_DIR, files[-1])
+        return os.path.join(checkpoint_dir, "policy_final.pth")
+    return os.path.join(checkpoint_dir, files[-1])
 
 
 def build_policy(checkpoint_path: str) -> PPOPolicy:
@@ -93,11 +98,13 @@ def build_policy(checkpoint_path: str) -> PPOPolicy:
     return policy
 
 
-def run_episode(policy: PPOPolicy, output_path: str, stochastic: bool = False) -> None:
-    env = NeTrainSimEnv()
+def run_episode(policy: PPOPolicy, output_path: str, stochastic: bool = False,
+                trains_file: str = TRAINS_FILE, reverse: bool = False) -> None:
+    env = NeTrainSimEnv(trains_file=trains_file)
     obs, _ = env.reset()
 
     cum_pos, xs, ys = load_path_coordinates()
+    route_len = float(cum_pos[-1])
 
     rows = []
     step = 0
@@ -129,9 +136,13 @@ def run_episode(policy: PPOPolicy, output_path: str, stochastic: bool = False) -
         position_m = float(state["position_m"])
         speed_mps  = float(state["speed_mps"])
 
-        # Interpolate (x, y) at the train's current position along the path
-        x_m = float(np.interp(position_m, cum_pos, xs))
-        y_m = float(np.interp(position_m, cum_pos, ys))
+        # Interpolate (x, y) at the train's current position along the path.
+        # load_path_coordinates() walks links in FORWARD (node 1→1500) order;
+        # on the return trip position_m counts from node 1500, so map it to the
+        # forward chainage first.
+        route_pos = (route_len - position_m) if reverse else position_m
+        x_m = float(np.interp(route_pos, cum_pos, xs))
+        y_m = float(np.interp(route_pos, cum_pos, ys))
 
         rows.append({
             "position_m": round(position_m, 3),
@@ -170,19 +181,31 @@ def run_episode(policy: PPOPolicy, output_path: str, stochastic: bool = False) -
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", default=None,
-                        help="Path to .pth checkpoint (default: latest in checkpoints/)")
+                        help="Path to .pth checkpoint (default: latest in checkpoints/, "
+                             "or checkpoints/return/ with --return-trip)")
     parser.add_argument("--output", default=None,
-                        help="Output CSV path (default: results/notch_profile.csv)")
+                        help="Output CSV path (default: results/notch_profile.csv, "
+                             "or results/return/notch_profile.csv with --return-trip)")
     parser.add_argument("--stochastic", action="store_true",
                         help="Sample actions from the policy instead of argmax "
                              "(representative for a high-entropy policy)")
+    parser.add_argument("--return-trip", action="store_true",
+                        help="Evaluate the B→A return trip (train_return.dat, "
+                             "checkpoints/return/, results/return/)")
     args = parser.parse_args()
 
-    checkpoint = args.checkpoint or find_latest_checkpoint()
-    output_path = args.output or os.path.join(OUTPUT_DIR, "notch_profile.csv")
+    checkpoint_dir = CHECKPOINT_DIR_RETURN if args.return_trip else CHECKPOINT_DIR
+    output_dir     = OUTPUT_DIR_RETURN     if args.return_trip else OUTPUT_DIR
+    trains_file    = TRAINS_FILE_RETURN    if args.return_trip else TRAINS_FILE
 
+    checkpoint = args.checkpoint or find_latest_checkpoint(checkpoint_dir)
+    output_path = args.output or os.path.join(output_dir, "notch_profile.csv")
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    print(f"Trip: {'B→A return' if args.return_trip else 'A→B forward'}")
     policy = build_policy(checkpoint)
-    run_episode(policy, output_path, stochastic=args.stochastic)
+    run_episode(policy, output_path, stochastic=args.stochastic,
+                trains_file=trains_file, reverse=args.return_trip)
 
 
 if __name__ == "__main__":
