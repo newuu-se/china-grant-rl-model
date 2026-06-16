@@ -42,12 +42,12 @@ os.makedirs(OUTDIR, exist_ok=True)
 NOTCH = [8, 6, 5, 4, 3, 2]
 STEPS = [5602, 5652, 5721, 5910, 6442, 8492]
 ENERGY = [862.41, 853.46, 849.10, 834.37, 788.63, 758.39]
-# RL eval point — update after each `python rl/evaluate.py` run.
-# 200-epoch run (2026-06-11, policy_best ep196), SAMPLED rollout — on-schedule
-# frontier parity: 790.0 kWh @ 6,417 s vs interpolated frontier ≈790.8 kWh.
-# The argmax is constant n1 (timeout) — sampled is the representative behavior.
-RL_STEPS, RL_ENERGY = 6417, 790.0
-RL_LABEL = "RL policy (sampled)"
+# RL eval point — 5-seed mean ± 95% CI at the chosen w_P=2 (sampled rollouts,
+# rl/aggregate_campaign.py, 2026-06-15). Forward trip. Supersedes the earlier
+# single-run point; ~1.3% above the interpolated frontier, CI overlapping.
+RL_STEPS, RL_ENERGY = 6203, 819.7
+RL_STEPS_CI, RL_ENERGY_CI = 440, 26.7
+RL_LABEL = "RL policy (5-seed mean ± 95% CI)"
 
 # ── shared "advanced" styling ────────────────────────────────────────────────
 plt.rcParams.update({
@@ -143,9 +143,11 @@ def plot_tradeoff():
                     ha="center", fontsize=10, fontweight="bold", color="#333")
     cbar = fig.colorbar(sc, ax=ax, pad=0.015); cbar.set_label("throttle notch", fontsize=11)
 
-    # RL greedy policy
-    ax.scatter([RL_STEPS], [RL_ENERGY], color=RLC, s=320, marker="*", zorder=5,
-               edgecolors="white", linewidths=1.5, label=f"{RL_LABEL}  ({RL_ENERGY:.0f} kWh, {RL_STEPS:,} s)")
+    # RL policy: 5-seed mean with 95% CI bars
+    ax.errorbar([RL_STEPS], [RL_ENERGY], xerr=[RL_STEPS_CI], yerr=[RL_ENERGY_CI],
+                color=RLC, marker="*", markersize=20, zorder=5, capsize=5,
+                markeredgecolor="white", markeredgewidth=1.5, elinewidth=1.6,
+                label=f"{RL_LABEL}  ({RL_ENERGY:.0f} kWh, {RL_STEPS:,} s)")
     # NeTrainSim native driver
     if nts:
         nts_e = float(nts["energy_cum"][-1]); nts_s = nts["steps"]

@@ -81,18 +81,29 @@ CONTROL_INTERVAL = 15    # action repeat: hold each chosen notch this many simul
 # (clean data, rl/run_baselines.py 2026-06-11): n8=862 kWh/5602 s, n6=853/5652,
 # n5=849/5721, n4=834/5910, n3=789/6442, n2=758/8492; the slowest ON-schedule
 # (≤6500 steps) trajectory ≈ notch 3, so ~789 kWh is the eco target.
-W_ENERGY        = 3.0      # per kWh — amplified so the fast→eco energy gap is a strong,
-                           # learnable gradient (at W_ENERGY=1 the eco gain was only ~5% of reward)
-W_PACE          = 2.0      # per-step penalty per (fraction-of-route) BEHIND the deadline pace;
-                           # zero when on/ahead → coast freely; lagging → pushed to keep pace.
-                           # Replaces the terminal-only late penalty the crawling mode ignored.
-W_OVERSPEED     = 1.0      # per (m/s) over the link limit (safety net; sim hard-caps speed)
-W_SMOOTH        = 0.15     # penalty per |Δnotch| between consecutive 15-s decisions. 0.5 (+low
-                           # entropy) collapsed the policy to a single constant notch; 0.15 is the
-                           # middle ground — discourages erratic 0↔8 jumping but lets the agent hold
-                           # notches for stretches and shift a few times with terrain.
+# Every reward weight and the time-feature ablation read an optional environment
+# override (RL_W_PACE, RL_W_ENERGY, RL_W_SMOOTH, RL_W_OVERSPEED, RL_ABLATE_TIME),
+# so the sensitivity sweep and ablation study set configurations WITHOUT editing
+# source — the single source of truth for every run is the env it launches with.
+def _envf(name: str, default: float) -> float:
+    v = os.environ.get(name)
+    return float(v) if v is not None and v != "" else default
+
+W_ENERGY        = _envf("RL_W_ENERGY", 3.0)   # per kWh — amplified so the fast→eco energy gap is a
+                           # strong, learnable gradient (at W_ENERGY=1 the eco gain was ~5% of reward)
+W_PACE          = _envf("RL_W_PACE", 2.0)     # per-step penalty per (fraction-of-route) BEHIND the
+                           # deadline pace; zero when on/ahead → coast freely; lagging → keep pace.
+                           # The sweep variable: too low → mode settles one notch below feasible.
+W_OVERSPEED     = _envf("RL_W_OVERSPEED", 1.0)   # per (m/s) over the link limit (sim hard-caps speed)
+W_SMOOTH        = _envf("RL_W_SMOOTH", 0.15)  # penalty per |Δnotch| between consecutive 15-s
+                           # decisions. 0.5 (+low entropy) collapsed to a constant notch; 0.15 is the
+                           # middle ground — discourages erratic 0↔8 jumping but allows terrain shifts.
 ARRIVAL_BONUS   = 200.0    # one-shot reward at terminus
 TIMEOUT_PENALTY = 1500.0   # large enough that giving up is never the best option
+
+# Ablation: when set, zero the two schedule features (time_frac, behind_frac) in
+# the observation, recreating the non-Markovian-reward failure mode for study.
+ABLATE_TIME_FEATURES = os.environ.get("RL_ABLATE_TIME", "0") == "1"
 
 # No progress-shaping term. With near-undiscounted DISCOUNT (0.9999 in train.py)
 # the arrival bonus / timeout penalty propagate back across the full ~6k-step
@@ -146,7 +157,6 @@ class NeTrainSimEnv(gym.Env):
         self._episode_count: int = 0
         self._episode_start: float = 0.0
         self._episode_reward: float = 0.0
-        self._last_position_m: float = 0.0  # for per-step progress reward
         self._prev_notch: int | None = None  # for the notch-change (smoothness) penalty
 
         if not os.path.isfile(SIMULATOR_BIN):
@@ -169,7 +179,6 @@ class NeTrainSimEnv(gym.Env):
         self._step_count = 0
         self._episode_reward = 0.0
         self._cum_energy_kwh = 0.0
-        self._last_position_m = 0.0
         self._prev_notch = None
         self._episode_start = time.time()
         self._episode_count += 1
@@ -178,7 +187,6 @@ class NeTrainSimEnv(gym.Env):
         self._last_state = state
         step_energy = float(state["energy_kwh"])
         self._cum_energy_kwh = step_energy  # include bootstrap step-0 energy
-        self._last_position_m = float(state["position_m"])
         # Bootstrap consumed one simulator timestep (notch=0 sent to get initial
         # state). Start _step_count at 1 so it tracks actual simulator steps.
         self._step_count = 1
@@ -234,7 +242,6 @@ class NeTrainSimEnv(gym.Env):
         # Episode boundaries.
         terminated = bool(state["terminated"]) or position_m >= TOTAL_ROUTE_LENGTH_M
         truncated = self._step_count >= MAX_STEPS and not terminated
-        self._last_position_m = position_m
 
         # Per-step pace penalty: penalize lagging the constant pace needed to reach
         # the terminus by DEADLINE_STEPS. Zero when on/ahead of schedule, so the
@@ -388,6 +395,10 @@ class NeTrainSimEnv(gym.Env):
         time_frac   = self._step_count / DEADLINE_STEPS
         target_pos  = time_frac * TOTAL_ROUTE_LENGTH_M
         behind_frac = max(0.0, target_pos - position) / TOTAL_ROUTE_LENGTH_M
+        if ABLATE_TIME_FEATURES:
+            # Non-Markov ablation: hide the clock from the policy (the reward still
+            # depends on it). Keeps the 9-dim shape so the network is unchanged.
+            time_frac = behind_frac = 0.0
         obs = np.array([
             float(state["speed_mps"])          / _SPEED_MAX,
             position                           / TOTAL_ROUTE_LENGTH_M,

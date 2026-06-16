@@ -23,7 +23,7 @@ from tianshou.policy import PPOPolicy
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from rl.train_env import (NeTrainSimEnv, NODES_FILE, LINKS_FILE,
-                          TRAINS_FILE, TRAINS_FILE_RETURN)
+                          TRAINS_FILE, TRAINS_FILE_RETURN, DEADLINE_STEPS)
 # Reuse training's policy factory + device so the eval policy can never drift
 # from the trained one (same architecture and hyperparameters).
 from rl.train import build_policy as build_ppo_policy, DEVICE
@@ -96,6 +96,37 @@ def build_policy(checkpoint_path: str) -> PPOPolicy:
     policy.eval()
     print(f"Loaded checkpoint: {checkpoint_path}")
     return policy
+
+
+def eval_policy(policy: PPOPolicy, trains_file: str = TRAINS_FILE,
+                stochastic: bool = False) -> dict:
+    """Run one greedy/sampled episode and return summary stats only (no CSV).
+    Used by the campaign (rl/run_experiment.py) to score each trained policy."""
+    env = NeTrainSimEnv(trains_file=trains_file)
+    obs, _ = env.reset()
+    terminated = truncated = False
+    notch_hist = [0] * 9
+    while not (terminated or truncated):
+        obs_t = torch.tensor(obs, dtype=torch.float32, device=DEVICE).unsqueeze(0)
+        with torch.no_grad():
+            probs, _ = policy.actor(obs_t)
+            probs = probs.squeeze(0)
+            notch = (int(torch.distributions.Categorical(probs).sample())
+                     if stochastic else int(probs.argmax().item()))
+        notch_hist[notch] += 1
+        obs, _, terminated, truncated, _ = env.step(notch)
+    energy = float(env._cum_energy_kwh)
+    steps = int(env._step_count)
+    env.close()
+    return {
+        "stochastic": stochastic,
+        "energy_kwh": round(energy, 3),
+        "steps": steps,
+        "arrived": bool(terminated),
+        "on_schedule": bool(terminated and steps <= DEADLINE_STEPS),
+        "lateness_frac": round(max(0.0, steps - DEADLINE_STEPS) / DEADLINE_STEPS, 4),
+        "notch_hist": notch_hist,
+    }
 
 
 def run_episode(policy: PPOPolicy, output_path: str, stochastic: bool = False,

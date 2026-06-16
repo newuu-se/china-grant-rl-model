@@ -25,8 +25,9 @@ os.makedirs(FIGDIR, exist_ok=True)
 RAW_LINKS = os.path.join(_REPO, "data", "netrainsim_v2", "linksFile_v2_fixed_speed.dat")
 CLEAN_LINKS = os.path.join(_REPO, "data", "netrainsim_v2", "linksFile_v2_clean.dat")
 RET_PROFILE = os.path.join(_REPO, "results", "return", "notch_profile_stochastic.csv")
-FWD_LOG = os.path.join(_REPO, "logs", "train_run_20260611_164433.log")
-RET_LOG = os.path.join(_REPO, "logs", "train_return_20260611_164433.log")
+# representative campaign runs (100-epoch, w_P=2, seed 0) for the training curves
+FWD_LOG = os.path.join(_REPO, "logs", "campaign", "sweep_forward_wp2_s0.log")
+RET_LOG = os.path.join(_REPO, "logs", "campaign", "sweep_return_wp2_s0.log")
 
 plt.rcParams.update({
     "figure.facecolor": "white", "axes.facecolor": "#fbfbfd",
@@ -92,12 +93,11 @@ def fig_tradeoff_return():
     fig.colorbar(sc, ax=ax, pad=0.015).set_label("throttle notch")
     ax.axvline(DEADLINE, color=GRAY, ls=":", lw=1.5,
                label="schedule deadline (6,500 s)")
-    ax.scatter([7076], [169.6], color=ORANGE, marker="*", s=300, zorder=5,
-               edgecolors="white", linewidths=1.4,
-               label="RL sampled, 200 ep (169.6 kWh, 7,076 s — 8.9% late)")
-    ax.scatter([5768], [317.67], color=RED, marker="D", s=130, zorder=5,
-               edgecolors="white", linewidths=1.4,
-               label="RL argmax, 100 ep (= const N4, on schedule)")
+    # RL policy: 5-seed mean ± 95% CI at the chosen w_P=2 (aggregate_campaign.py)
+    ax.errorbar([6523], [221.2], xerr=[143], yerr=[21.9], color=ORANGE, marker="*",
+                markersize=18, zorder=5, capsize=5, markeredgecolor="white",
+                markeredgewidth=1.4, elinewidth=1.6,
+                label="RL, $w_P{=}2$ (5-seed mean $\\pm$ 95% CI): 221 kWh, 6,523 s")
     ax.set_xlabel("trip time (s)"); ax.set_ylabel("total trip energy (kWh)")
     ax.set_title("Return trip (Ho'jakent$\\rightarrow$Toshkent): frontier and RL outcomes")
     ax.legend(loc="upper right", fontsize=9)
@@ -147,13 +147,13 @@ def parse_log(path):
 
 def fig_training_curves():
     fig, ax = plt.subplots(1, 2, figsize=(10.5, 4.2))
-    for a, log, title in ((ax[0], FWD_LOG, "Forward trip (200 epochs)"),
-                          (ax[1], RET_LOG, "Return trip (200 epochs)")):
+    for a, log, title in ((ax[0], FWD_LOG, "Forward trip (100 epochs, seed 0)"),
+                          (ax[1], RET_LOG, "Return trip (100 epochs, seed 0)")):
         ep, te, be = parse_log(log)
         a.plot(ep, te, color=BLUE, lw=0.9, alpha=0.5, label="test reward")
         a.plot(ep, be, color="#059669", lw=2, label="best reward")
-        a.axvline(140, color=GRAY, ls=":", lw=1.2)
-        a.annotate("entropy $\\rightarrow$ 0", (140, a.get_ylim()[0]), fontsize=8.5,
+        a.axvline(70, color=GRAY, ls=":", lw=1.2)
+        a.annotate("entropy $\\rightarrow$ 0", (70, a.get_ylim()[0]), fontsize=8.5,
                    color=GRAY, xytext=(4, 8), textcoords="offset points")
         a.set_xlabel("epoch"); a.set_title(title, fontsize=11)
         a.legend(fontsize=9, loc="lower right")

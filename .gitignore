@@ -215,3 +215,7 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+
+# Training artifacts (models + logs are large/regenerable; release via Zenodo, not git)
+checkpoints/
+logs/

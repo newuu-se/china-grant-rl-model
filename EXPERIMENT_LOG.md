@@ -495,3 +495,49 @@ The return trip converged past its eco point into "cheap but late" (169.6 kWh,
 mode settles one notch below the schedule-feasible point because `W_PACE=2`
 prices lateness too cheaply. Next experiment: `W_PACE` 2→4–6 on both trips;
 then re-ask whether terrain-aware modulation can move *below* the frontier.*
+
+---
+
+## 11. Reviewer-response campaign (2026-06-15) — sensitivity, ablation, variance
+
+Addresses journal feedback: (1) systematic reward sensitivity + ablation +
+theoretical coefficient justification; (2) variance/CIs/significance over
+single runs. Infrastructure added: per-RNG seeding (reproducible: same seed →
+identical run, verified), env-var reward-weight overrides, `rl/run_experiment.py`
+(one seeded run → results.json), `rl/run_campaign.py` (65-run matrix, resumable),
+`rl/aggregate_campaign.py` (mean±95%CI + permutation p-values + figures),
+`rl/reward_theory.py` (closed-form). 65 runs (w_P∈{0,1,2,4,8}×5 seeds×2 trips +
+3 forward ablations×5 seeds), 100 epochs each, 9.5 h, **0 failures**.
+
+**Closed-form coefficient theory (the key correction).** For constant-notch
+policies R(n;w_P) = a(n) − w_P·Σβ(n) is linear in w_P (Σβ = integrated
+behind-schedule fraction). The schedule-feasible eco notch is reward-optimal for
+**w_P ≥ 0.07 (forward, N3) / 0.47 (return, N2)**. The chosen w_P=2 is 30×/4×
+above threshold → coefficients justified analytically. **This OVERTURNS the
+iteration-10 claim that lateness was an underpriced tradeoff**: that arithmetic
+compared the final pace penalty, not its integral Σβ; done correctly the schedule
+term already dominates the one-notch energy saving ~4:1.
+
+**Sensitivity sweep (5 seeds, mean±95%CI).** Forward energy is FLAT across w_P
+(819–825 kWh, all p>0.66 vs w_P=2) — exactly as theory predicts. What w_P controls
+is schedule RELIABILITY: forward lateness 12.6%→0, on-sched 60%→100% as w_P 0→8;
+return reaches 100% on-time only at w_P=8 (energy rises, p=0.007). So **w_P is a
+schedule-reliability knob, not an energy–time price.**
+
+**Headline (w_P=2, 5 seeds):** forward 819.7±26.7 kWh / 6203±440 s, 4/5 on-sched
+(~1.3% above frontier, −5.0% vs flat-out, −3.4% vs native driver); return
+221.2±21.9 kWh / 6523±143 s, 2/5 on-sched (eco energy, borderline timing). NOTE
+these seeded means replace iteration-10's lucky single-run 790 kWh — the honest
+number is ~820.
+
+**Ablation (forward, 5 seeds):** energy robust to all (p>0.26); the PACE term is
+the one essential for schedule (remove → 12.6%±22 late); no-time-features drops
+on-sched 80→60% (Markov); constant-entropy worse reward; no-smoothness lowers
+energy but breaks the argmax (deployability). argmax is high-variance/often
+degenerate across seeds → sampled policy is the deployable artifact.
+
+Paper (latex/main.tex) rewritten accordingly: new §"Reward-coefficient analysis"
+(theory+sweep+ablation), seeded headline table, figures fig_reward_theory /
+fig_sensitivity / fig_ablation; the "raise w_P / future work" framing removed.
+Artifacts: results/campaign/, results/theory/. Open next step: more seeds to sharpen
+return/ablation significance; make the deterministic argmax reliable.

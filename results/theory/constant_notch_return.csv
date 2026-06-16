@@ -1,0 +1,8 @@
+notch,steps,energy_kwh,sum_beta,sum_overspeed,arrived,on_schedule
+1,7681,170.056,503.2109,0.0,True,False
+2,6375,242.217,40.036,0.0,True,True
+3,5950,293.933,27.7911,0.0,True,True
+4,5768,317.667,24.6656,0.0,True,True
+5,5682,327.369,23.3396,0.0,True,True
+6,5641,335.79,22.634,0.0,True,True
+8,5605,348.343,22.2057,0.0,True,True
