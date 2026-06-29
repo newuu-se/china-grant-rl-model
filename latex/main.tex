@@ -411,6 +411,7 @@ function stable.
 \caption{PPO hyperparameters (Tianshou 0.5.1~\cite{weng2022tianshou},
 Gymnasium environment~\cite{towers2024gymnasium}).}
 \label{tab:hyper}
+\resizebox{\columnwidth}{!}{%
 \begin{tabular}{llll}
 \toprule
 Algorithm & PPO~\cite{schulman2017ppo}, separate actor/critic & Discount $\gamma$ & 0.9999 \\
@@ -421,7 +422,7 @@ Batch / reuse & 2048 / 4 epochs per collect & Adv.\ + return norm. & on / on \\
 Episodes per collect & 8 (full episodes) & Entropy coef. & $0.004 \to 0$ linearly by $0.7\times$ budget \\
 Budget & 100 epochs ($\approx$800 episodes, $\sim$17\,min)\tnote{a} & Checkpointing & best test reward \\
 \bottomrule
-\end{tabular}
+\end{tabular}}
 \begin{tablenotes}\footnotesize
 \item[a] Wall-clock per run on the training workstation (20-core CPU; the
 network is small and inference is one step at a time, so CPU is faster than
