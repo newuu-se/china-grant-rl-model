@@ -1,14 +1,36 @@
 """
-Summary plots for the train-energy project (current physics: GOST Davis + no regen).
-Outputs PNGs into results/plots/.
+Figures for the train-energy RL study — for the paper, and for checking that the
+model actually learned something sensible.
 
-  1. energy_time_tradeoff.png  — polished energy-vs-trip-time curve over constant
-     notches, with the RL greedy policy and NeTrainSim's native driver overlaid.
-  2. netrainsim_trajectory.png — the trajectory NeTrainSim itself produces (the data
-     its GUI plots): speed vs limit, notch, tractive/resistance forces, power,
-     cumulative energy and grade along the route.
-  3. rl_policy_profile.png     — RL greedy policy speed/notch/grade along the route.
-  4. training_curve.png        — test/best reward per epoch for the final run.
+Four figures, each answering one question:
+
+  1. fig_training_progress  Did training work?
+                            Reward, trip energy, trip time and arrival rate over
+                            the whole run. If these do not improve, nothing else
+                            in this file is worth reading.
+
+  2. fig_energy_time_tradeoff  Is the policy any good?
+                            The constant-notch frontier (the thing to beat) with
+                            the trained policy placed on it.
+
+  3. fig_speed_profile      What does the policy actually DO?
+                            Speed against the limit, the notch it chose, and the
+                            terrain that drove the choice, along the route.
+
+  4. fig_energy_usage       Where does the energy GO?
+                            Cumulative energy and energy per km against grade —
+                            this is where terrain-aware driving shows up or does not.
+
+Every number is read from a file; nothing is pasted in as a constant:
+
+  results/baselines_<trip>.json          rl/run_baselines.py
+  results/notch_profile_stochastic.csv   rl/evaluate.py --stochastic
+  data/netrainsim_v2/linksFile_v2_clean.dat   route grade + speed limits
+  logs/train_run_*.log                   training stdout
+
+A figure whose inputs are missing is skipped with a message saying what to run.
+
+Output: results/plots/<name>.png (300 dpi) + <name>.pdf (vector, for submission).
 
 Usage:
     source venv/bin/activate
@@ -16,6 +38,7 @@ Usage:
 """
 import csv
 import glob
+import json
 import os
 import re
 import sys
@@ -23,213 +46,458 @@ import sys
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.ticker import MultipleLocator
 import numpy as np
+from matplotlib.ticker import MultipleLocator
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _REPO)
-from rl.train_env import CONTROL_INTERVAL, LINKS_FILE as LINKS  # same data the env trains on
-# Sampled rollout is the representative trained behavior (matches RL_STEPS/RL_ENERGY);
-# notch_profile.csv holds the argmax rollout.
-PROFILE = os.path.join(_REPO, "results", "notch_profile_stochastic.csv")
-NTS_GLOB = os.path.join(_REPO, "NeTrainSim-adjusted", "res", "trainTrajectory_*.csv")
-OUTDIR = os.path.join(_REPO, "results", "plots")
+from rl.train_env import LINKS_FILE, DEADLINE_STEPS, TOTAL_ROUTE_LENGTH_M
+
+RESULTS = os.path.join(_REPO, "results")
+OUTDIR = os.path.join(RESULTS, "plots")
 os.makedirs(OUTDIR, exist_ok=True)
 
-# Measured constant-notch curve — STALE WHENEVER PHYSICS OR INPUT DATA CHANGES;
-# regenerate with `python rl/run_baselines.py` and paste its output here.
-# Current: GOST Davis, no regen, linksFile_v2_clean.dat (2026-06-11).
-NOTCH = [8, 6, 5, 4, 3, 2]
-STEPS = [5602, 5652, 5721, 5910, 6442, 8492]
-ENERGY = [862.41, 853.46, 849.10, 834.37, 788.63, 758.39]
-# RL eval point — 5-seed mean ± 95% CI at the chosen w_P=2 (sampled rollouts,
-# rl/aggregate_campaign.py, 2026-06-15). Forward trip. Supersedes the earlier
-# single-run point; ~1.3% above the interpolated frontier, CI overlapping.
-RL_STEPS, RL_ENERGY = 6203, 819.7
-RL_STEPS_CI, RL_ENERGY_CI = 440, 26.7
-RL_LABEL = "RL policy (5-seed mean ± 95% CI)"
+ROUTE_KM = TOTAL_ROUTE_LENGTH_M / 1000.0
 
-# ── shared "advanced" styling ────────────────────────────────────────────────
+# ── figure geometry (journal column widths, inches) ──────────────────────────
+COL1, COL2 = 3.46, 7.09
+
+# ── Okabe-Ito colourblind-safe palette ───────────────────────────────────────
+BLUE   = "#0072B2"   # the RL policy
+ORANGE = "#E69F00"   # energy
+GREEN  = "#009E73"   # return trip / success
+VERM   = "#D55E00"   # limits, deadlines, warnings
+PURPLE = "#CC79A7"   # notch
+SKY    = "#56B4E9"
+GREY   = "#6E6E6E"
+INK    = "#1A1A1A"
+
 plt.rcParams.update({
-    "figure.facecolor": "white",
-    "axes.facecolor": "#fbfbfd",
-    "axes.edgecolor": "#b8b8c0",
-    "axes.linewidth": 1.1,
-    "axes.grid": True,
-    "grid.color": "#e3e3ea",
-    "grid.linewidth": 0.9,
-    "font.size": 11,
-    "font.family": "DejaVu Sans",
-    "axes.titlesize": 14,
-    "axes.titleweight": "bold",
-    "axes.labelsize": 12,
-    "axes.labelweight": "medium",
-    "legend.framealpha": 0.95,
-    "legend.edgecolor": "#cccccc",
-    "savefig.dpi": 150,
+    "figure.dpi": 150,
+    "savefig.dpi": 300,
     "savefig.bbox": "tight",
+    "savefig.pad_inches": 0.02,
+    "font.family": "sans-serif",
+    "font.sans-serif": ["Helvetica", "Arial", "DejaVu Sans"],
+    "font.size": 8,
+    "axes.titlesize": 8.5,
+    "axes.labelsize": 8,
+    "axes.linewidth": 0.6,
+    "axes.edgecolor": INK,
+    "axes.labelcolor": INK,
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "axes.grid": True,
+    "grid.color": "#D9D9D9",
+    "grid.linewidth": 0.4,
+    "xtick.labelsize": 7.5,
+    "ytick.labelsize": 7.5,
+    "xtick.color": INK,
+    "ytick.color": INK,
+    "xtick.major.width": 0.6,
+    "ytick.major.width": 0.6,
+    "xtick.major.size": 2.5,
+    "ytick.major.size": 2.5,
+    "legend.fontsize": 7.5,
+    "legend.frameon": False,
+    "legend.handlelength": 1.6,
+    "lines.linewidth": 1.2,
+    "lines.solid_capstyle": "round",
+    "text.color": INK,
 })
-ACCENT, RLC, NTSC = "#2563eb", "#f59e0b", "#dc2626"
+
+
+def save(fig, name):
+    png = os.path.join(OUTDIR, f"{name}.png")
+    fig.savefig(png)
+    fig.savefig(os.path.join(OUTDIR, f"{name}.pdf"))
+    plt.close(fig)
+    return png
+
+
+def panel(ax, text):
+    ax.text(-0.13, 1.05, text, transform=ax.transAxes, fontsize=9,
+            fontweight="bold", va="bottom", ha="left")
+
+
+def rolling(y, w):
+    """Centred rolling mean, edge-padded so the output keeps its length."""
+    y = np.asarray(y, float)
+    if len(y) < w or w < 2:
+        return y
+    pad = w // 2
+    return np.convolve(np.pad(y, pad, mode="edge"), np.ones(w) / w,
+                       mode="same")[pad:pad + len(y)]
+
+
+# ── data loaders ─────────────────────────────────────────────────────────────
+
+def load_baselines(trip="forward"):
+    """Constant-notch frontier measured by rl/run_baselines.py."""
+    path = os.path.join(RESULTS, f"baselines_{trip}.json")
+    if not os.path.isfile(path):
+        return None
+    with open(path) as f:
+        recs = sorted(json.load(f)["records"], key=lambda r: r["notch"])
+    return {
+        "notch":  np.array([r["notch"] for r in recs]),
+        "steps":  np.array([r["steps"] for r in recs], float),
+        "energy": np.array([r["energy_kwh"] for r in recs], float),
+    }
+
+
+def load_profile(trip="forward"):
+    """One evaluated rollout (rl/evaluate.py --stochastic).
+
+    energy_kwh_cum is optional: profiles exported before that column existed
+    still load, they just cannot drive the energy figure."""
+    sub = ("return",) if trip == "return" else ()
+    path = os.path.join(RESULTS, *sub, "notch_profile_stochastic.csv")
+    if not os.path.isfile(path):
+        return None
+    cols = {}
+    with open(path) as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            for k, v in row.items():
+                cols.setdefault(k, []).append(v)
+    out = {"pos": np.array([float(v) for v in cols["position_m"]]),
+           "speed": np.array([float(v) for v in cols["speed_mps"]]),
+           "notch": np.array([int(v) for v in cols["notch"]])}
+    for opt, cast in (("energy_kwh_cum", float), ("time_s", float)):
+        if opt in cols:
+            out[opt.replace("energy_kwh_cum", "energy").replace("time_s", "time")] = \
+                np.array([cast(v) for v in cols[opt]])
+    return out
 
 
 def load_links():
     cum, spd, grade = [0.0], [], []
-    with open(LINKS) as f:
+    with open(LINKS_FILE) as f:
         f.readline(); f.readline()
         for line in f:
             p = line.split()
             if len(p) < 8:
                 continue
-            cum.append(cum[-1] + float(p[3])); spd.append(float(p[4])); grade.append(float(p[6]))
+            cum.append(cum[-1] + float(p[3]))
+            spd.append(float(p[4])); grade.append(float(p[6]))
     return np.array(cum), np.array(spd), np.array(grade)
 
 
-def load_profile():
-    pos, speed, notch = [], [], []
-    with open(PROFILE) as f:
-        for row in csv.DictReader(f):
-            speed.append(float(row["speed_mps"])); notch.append(int(row["notch"]))
-            if "position_m" in row:
-                pos.append(float(row["position_m"]))
-    speed = np.array(speed)
-    # Use true position if present (correct under action-repeat); else integrate
-    # speed × decision duration (each CSV row spans CONTROL_INTERVAL sim seconds).
-    dist = (np.array(pos) if len(pos) == len(speed)
-            else np.cumsum(speed * CONTROL_INTERVAL))
-    return dist, speed, np.array(notch)
+def load_training(trip="forward"):
+    """Parse a training log into per-epoch rewards and per-episode outcomes.
 
-
-def load_nts():
-    files = sorted(glob.glob(NTS_GLOB), key=os.path.getmtime)
-    if not files:
+    Two line kinds are emitted during training:
+      Epoch #12: test_reward: -2401.3 ... best_reward: -2323.0
+      [✓ ARRIVED]  ep=  87   6,203 steps   74,891m (100.0%)  energy=  819.7 kWh ...
+    Episodes interleave across the 8 parallel workers, so they are plotted in log
+    order (a training-progress axis, not a per-worker episode index).
+    """
+    pattern = "train_return_*.log" if trip == "return" else "train_run_*.log"
+    logs = sorted(glob.glob(os.path.join(_REPO, "logs", pattern)),
+                  key=os.path.getmtime)
+    if not logs:
         return None
-    rows = list(csv.DictReader(open(files[-1])))
-    g = lambda k: np.array([float(r[k]) for r in rows])
+
+    ep_re = re.compile(r"Epoch #(\d+):.*?test_reward:\s*(-?[\d.]+).*?best_reward:\s*(-?[\d.]+)")
+    ce_re = re.compile(
+        r"\[(✓ ARRIVED|✗ TIMEOUT)\]\s+ep=\s*(\d+)\s+([\d,]+) steps.*?"
+        r"energy=\s*([\d.]+) kWh\s+reward=\s*([-+]?[\d.]+)")
+
+    epochs, test_r, best_r = [], [], []
+    arrived, steps, energy, ep_reward = [], [], [], []
+    with open(logs[-1], errors="replace") as f:
+        for line in f:
+            m = ep_re.search(line)
+            if m:
+                epochs.append(int(m.group(1)))
+                test_r.append(float(m.group(2)))
+                best_r.append(float(m.group(3)))
+                continue
+            m = ce_re.search(line)
+            if m:
+                arrived.append(m.group(1).endswith("ARRIVED"))
+                steps.append(float(m.group(3).replace(",", "")))
+                energy.append(float(m.group(4)))
+                ep_reward.append(float(m.group(5)))
+    if not epochs and not steps:
+        return None
     return {
-        "dist": g("TravelledDistance_m") / 1000.0,
-        "speed": g("Speed_mps"),
-        "limit": g("LinkMaxSpeed_mps"),
-        "notch": g("FirstLocoNotchPosition"),
-        "tractive": g("tractiveForce_N") / 1000.0,
-        "resist": g("ResistanceForces_N") / 1000.0,
-        "power": g("CurrentUsedTractivePower_kw"),
-        "energy_cum": np.cumsum(g("EnergyConsumption_KWH")),
-        "grade": g("GradeAtTip_Perc"),
-        "steps": len(rows),
+        "log": os.path.basename(logs[-1]),
+        "epoch": np.array(epochs), "test": np.array(test_r), "best": np.array(best_r),
+        "arrived": np.array(arrived, bool), "steps": np.array(steps),
+        "energy": np.array(energy), "ep_reward": np.array(ep_reward),
     }
 
 
-def load_training(log_path):
-    e, t, b = [], [], []
-    pat = re.compile(r"Epoch #(\d+): test_reward: (-?[0-9.]+).*best_reward: (-?[0-9.]+)")
-    for line in open(log_path):
-        m = pat.search(line)
-        if m:
-            e.append(int(m.group(1))); t.append(float(m.group(2))); b.append(float(m.group(3)))
-    return np.array(e), np.array(t), np.array(b)
+# ── 1. did training work? ────────────────────────────────────────────────────
 
-
-def plot_tradeoff():
-    nts = load_nts()
-    fig, ax = plt.subplots(figsize=(9, 6))
-
-    # shaded region under the constant-notch frontier
-    ax.fill_between(STEPS, ENERGY, min(ENERGY) - 15, color=ACCENT, alpha=0.06, zorder=0)
-    ax.plot(STEPS, ENERGY, "-", color=ACCENT, lw=2.2, alpha=0.55, zorder=2)
-    sc = ax.scatter(STEPS, ENERGY, c=NOTCH, cmap="viridis", s=170, zorder=3,
-                    edgecolors="white", linewidths=1.6)
-    for n, s, en in zip(NOTCH, STEPS, ENERGY):
-        ax.annotate(f"N{n}", (s, en), textcoords="offset points", xytext=(0, 13),
-                    ha="center", fontsize=10, fontweight="bold", color="#333")
-    cbar = fig.colorbar(sc, ax=ax, pad=0.015); cbar.set_label("throttle notch", fontsize=11)
-
-    # RL policy: 5-seed mean with 95% CI bars
-    ax.errorbar([RL_STEPS], [RL_ENERGY], xerr=[RL_STEPS_CI], yerr=[RL_ENERGY_CI],
-                color=RLC, marker="*", markersize=20, zorder=5, capsize=5,
-                markeredgecolor="white", markeredgewidth=1.5, elinewidth=1.6,
-                label=f"{RL_LABEL}  ({RL_ENERGY:.0f} kWh, {RL_STEPS:,} s)")
-    # NeTrainSim native driver
-    if nts:
-        nts_e = float(nts["energy_cum"][-1]); nts_s = nts["steps"]
-        ax.scatter([nts_s], [nts_e], color=NTSC, s=180, marker="D", zorder=5,
-                   edgecolors="white", linewidths=1.5,
-                   label=f"NeTrainSim driver  ({nts_e:.0f} kWh, {nts_s:,} s)")
-
-    ax.set_xlabel("trip time  (s)"); ax.set_ylabel("total trip energy  (kWh)")
-    ax.set_title("Energy vs Trip Time — ER9E on Toshkent→Ho'jakent\nGOST resistance, regenerative braking removed")
-    ax.legend(loc="upper right", fontsize=10.5)
-    # axes derived from the data so new baseline/RL points are never cropped
-    xs_all = STEPS + [RL_STEPS]; ys_all = ENERGY + [RL_ENERGY]
-    ax.set_xlim(min(xs_all) - 250, max(xs_all) + 350)
-    ax.set_ylim(min(ys_all) - 30, max(ys_all) + 40)
-    p = os.path.join(OUTDIR, "energy_time_tradeoff.png"); fig.savefig(p); plt.close(fig); return p
-
-
-def plot_netrainsim():
-    d = load_nts()
+def fig_training_progress(trip="forward"):
+    d = load_training(trip)
     if d is None:
         return None
-    x = d["dist"]
-    fig, ax = plt.subplots(5, 1, figsize=(12, 11), sharex=True,
-                           gridspec_kw={"height_ratios": [2, 1.2, 1.6, 1.4, 1.2]})
-    fig.suptitle(f"NeTrainSim trajectory — native driver  ({d['energy_cum'][-1]:.0f} kWh, {d['steps']:,} s, {x[-1]:.1f} km)",
-                 fontsize=15, fontweight="bold", y=0.995)
+    base = load_baselines(trip)
 
-    ax[0].plot(x, d["speed"], color=ACCENT, lw=1.1, label="train speed")
-    ax[0].plot(x, d["limit"], color=NTSC, lw=1.0, alpha=0.7, ls="--", label="speed limit")
-    ax[0].set_ylabel("speed (m/s)"); ax[0].legend(loc="upper right", fontsize=9.5)
+    fig, axes = plt.subplots(2, 2, figsize=(COL2, 4.6))
+    (ax_r, ax_e), (ax_t, ax_a) = axes
 
-    ax[1].step(x, d["notch"], where="post", color="#7c3aed", lw=1.1)
-    ax[1].set_ylabel("notch"); ax[1].set_ylim(-0.5, 8.5); ax[1].yaxis.set_major_locator(MultipleLocator(2))
+    # (a) reward per epoch — the optimiser's own view of progress
+    if len(d["epoch"]):
+        ax_r.plot(d["epoch"], d["test"], color=SKY, lw=0.7, alpha=0.9,
+                  label="test reward")
+        ax_r.plot(d["epoch"], d["best"], color=BLUE, lw=1.4, label="running best")
+        ax_r.set_xlabel("epoch")
+        ax_r.legend(loc="lower right")
+    ax_r.set_ylabel("episode reward")
+    ax_r.set_title("Reward improves", pad=5)
+    panel(ax_r, "(a)")
 
-    ax[2].plot(x, d["tractive"], color="#059669", lw=1.0, label="tractive force")
-    ax[2].plot(x, d["resist"], color="#b45309", lw=1.0, alpha=0.8, label="resistance")
-    ax[2].axhline(0, color="#999", lw=0.6); ax[2].set_ylabel("force (kN)"); ax[2].legend(loc="upper right", fontsize=9.5)
+    n = np.arange(len(d["energy"]))
+    w = max(5, len(n) // 40)
 
-    ax[3].plot(x, d["energy_cum"], color="#be123c", lw=1.6)
-    ax[3].fill_between(x, d["energy_cum"], color="#be123c", alpha=0.10)
-    ax[3].set_ylabel("cum. energy (kWh)")
+    # (b) trip energy per training episode — the actual objective
+    if len(n):
+        ax_e.plot(n, d["energy"], color=ORANGE, lw=0.35, alpha=0.35)
+        ax_e.plot(n, rolling(d["energy"], w), color=ORANGE, lw=1.4,
+                  label=f"rolling mean ({w})")
+        if base is not None:
+            eco = int(np.argmin(np.where(base["steps"] <= DEADLINE_STEPS,
+                                         base["energy"], np.inf)))
+            ax_e.axhline(base["energy"][eco], color=GREY, lw=0.8, ls=(0, (4, 2)),
+                         label=f"best on-time constant notch (N{base['notch'][eco]})")
+        ax_e.legend(loc="upper right")
+    ax_e.set_xlabel("training episode")
+    ax_e.set_ylabel("trip energy (kWh)")
+    ax_e.set_title("Energy falls toward the frontier", pad=5)
+    panel(ax_e, "(b)")
 
-    ax[4].fill_between(x, d["grade"], color="#6b7280", alpha=0.55, step="mid")
-    ax[4].axhline(0, color="k", lw=0.6); ax[4].set_ylabel("grade (%)"); ax[4].set_xlabel("distance along route (km)")
+    # (c) trip time against the deadline — the constraint
+    if len(n):
+        ax_t.plot(n, d["steps"], color=BLUE, lw=0.35, alpha=0.35)
+        ax_t.plot(n, rolling(d["steps"], w), color=BLUE, lw=1.4)
+        ax_t.axhline(DEADLINE_STEPS, color=VERM, lw=0.9, ls=(0, (4, 2)))
+        ax_t.annotate("deadline", (0.99, DEADLINE_STEPS),
+                      xycoords=("axes fraction", "data"), xytext=(0, 3),
+                      textcoords="offset points", ha="right", va="bottom",
+                      fontsize=6.5, color=VERM)
+    ax_t.set_xlabel("training episode")
+    ax_t.set_ylabel("trip time (s)")
+    ax_t.set_title("Trip time settles under the deadline", pad=5)
+    panel(ax_t, "(c)")
 
-    fig.tight_layout(rect=[0, 0, 1, 0.985])
-    p = os.path.join(OUTDIR, "netrainsim_trajectory.png"); fig.savefig(p); plt.close(fig); return p
+    # (d) arrival rate — did it ever stop timing out?
+    if len(n):
+        ax_a.plot(n, 100 * rolling(d["arrived"].astype(float), w),
+                  color=GREEN, lw=1.4)
+        ax_a.set_ylim(-4, 104)
+    ax_a.set_xlabel("training episode")
+    ax_a.set_ylabel("arrivals (%, rolling)")
+    ax_a.set_title("Episodes reach the terminus", pad=5)
+    panel(ax_a, "(d)")
+
+    fig.suptitle(f"Training progress — {d['log']}", fontsize=9.5, y=1.005)
+    fig.tight_layout(w_pad=2.2, h_pad=1.8)
+    return save(fig, f"fig_training_progress_{trip}")
 
 
-def plot_profile():
-    cum, spd_lim, grade = load_links()
-    dist, speed, notch = load_profile()
-    fig, axes = plt.subplots(3, 1, figsize=(11, 8), sharex=True,
-                             gridspec_kw={"height_ratios": [2, 1.2, 1.2]})
-    axes[0].plot(dist / 1000, speed, color=ACCENT, lw=1, label="train speed")
-    axes[0].plot(cum[1:] / 1000, spd_lim, color=NTSC, lw=1, alpha=.7, ls="--", label="speed limit")
-    axes[0].set_ylabel("speed (m/s)"); axes[0].legend(loc="upper right", fontsize=9)
-    axes[0].set_title(f"{RL_LABEL} along the route  ({RL_ENERGY:.0f} kWh, {RL_STEPS:,} s)")
-    axes[1].step(dist / 1000, notch, where="post", color=RLC, lw=1)
-    axes[1].set_ylabel("notch"); axes[1].set_ylim(-0.5, 8.5)
-    axes[2].fill_between(cum[1:] / 1000, grade, color="#6b7280", alpha=.5, step="mid")
-    axes[2].axhline(0, color="k", lw=0.6); axes[2].set_ylabel("grade (%)"); axes[2].set_xlabel("distance (km)")
-    fig.tight_layout(); p = os.path.join(OUTDIR, "rl_policy_profile.png"); fig.savefig(p); plt.close(fig); return p
+# ── 2. is the policy any good? ───────────────────────────────────────────────
 
-
-def plot_training():
-    logs = sorted(glob.glob(os.path.join(_REPO, "logs", "train_run_*.log")), key=os.path.getmtime)
-    if not logs:
+def fig_energy_time_tradeoff():
+    trips = [(t, load_baselines(t)) for t in ("forward", "return")]
+    trips = [(t, b) for t, b in trips if b is not None]
+    if not trips:
         return None
-    epoch, test, best = load_training(logs[-1])
-    if len(epoch) == 0:
+
+    fig, axes = plt.subplots(1, len(trips), figsize=(COL2, 2.9))
+    axes = np.atleast_1d(axes)
+    titles = {"forward": "Toshkent $\\rightarrow$ Ho'jakent (net $+347$ m)",
+              "return":  "Ho'jakent $\\rightarrow$ Toshkent (net $-347$ m)"}
+
+    for ax, (trip, base), lab in zip(axes, trips, "ab"):
+        order = np.argsort(base["steps"])
+        s, e, n = base["steps"][order], base["energy"][order], base["notch"][order]
+
+        ax.axvspan(DEADLINE_STEPS, max(s.max(), DEADLINE_STEPS) * 1.06,
+                   color=VERM, alpha=0.06, lw=0)
+        ax.axvline(DEADLINE_STEPS, color=VERM, lw=0.8, ls=(0, (4, 2)))
+        ax.annotate("deadline", (DEADLINE_STEPS, 0.02),
+                    xycoords=("data", "axes fraction"), xytext=(-3, 0),
+                    textcoords="offset points", rotation=90, ha="right",
+                    va="bottom", fontsize=6.5, color=VERM)
+
+        ax.plot(s, e, "-", color=GREY, lw=1.0, zorder=2,
+                label="constant notch")
+        ax.scatter(s, e, s=26, color="white", edgecolors=INK, linewidths=0.9,
+                   zorder=3)
+        # alternate the label side: the frontier bunches at the fast end
+        for i, (ni, si, ei) in enumerate(zip(n, s, e)):
+            dx, ha = (-7, "right") if i % 2 else (7, "left")
+            ax.annotate(f"N{ni}", (si, ei), textcoords="offset points",
+                        xytext=(dx, 1), ha=ha, va="center", fontsize=6.5,
+                        color=GREY)
+
+        prof = load_profile(trip)
+        if prof is not None and "energy" in prof and "time" in prof:
+            ax.scatter([prof["time"][-1]], [prof["energy"][-1]], s=44,
+                       color=BLUE, marker="o", zorder=5, edgecolors="white",
+                       linewidths=0.9,
+                       label=f"RL policy ({prof['energy'][-1]:.0f} kWh, "
+                             f"{prof['time'][-1]:,.0f} s)")
+        ax.legend(loc="upper right")
+        ax.set_xlabel("trip time (s)")
+        if lab == "a":
+            ax.set_ylabel("total trip energy (kWh)")
+        ax.set_title(titles.get(trip, trip), pad=6)
+        panel(ax, f"({lab})")
+
+    fig.tight_layout(w_pad=2.0)
+    return save(fig, "fig_energy_time_tradeoff")
+
+
+# ── 3. what does the policy do? ──────────────────────────────────────────────
+
+def fig_speed_profile(trip="forward"):
+    prof = load_profile(trip)
+    if prof is None:
         return None
-    fig, ax = plt.subplots(figsize=(8.5, 5))
-    ax.plot(epoch, test, color=ACCENT, lw=1, alpha=0.55, label="test reward")
-    ax.plot(epoch, best, color="#059669", lw=2.2, label="best reward (running)")
-    ax.set_xlabel("epoch"); ax.set_ylabel("episode reward")
-    ax.set_title(f"Training progress — {os.path.basename(logs[-1])}")
-    ax.legend(loc="lower right", fontsize=10)
-    p = os.path.join(OUTDIR, "training_curve.png"); fig.savefig(p); plt.close(fig); return p
+    cum, lim, grade = load_links()
+    km = prof["pos"] / 1000.0
+    cum_km = cum[1:] / 1000.0
+
+    fig, axes = plt.subplots(3, 1, figsize=(COL2, 4.4), sharex=True,
+                             gridspec_kw={"height_ratios": [2.0, 1.0, 1.0],
+                                          "hspace": 0.12})
+
+    axes[0].step(cum_km, lim, where="post", color=VERM, lw=0.8, ls=(0, (4, 2)),
+                 label="speed limit")
+    axes[0].plot(km, prof["speed"], color=BLUE, lw=0.9, label="train speed")
+    axes[0].set_ylabel("speed (m s$^{-1}$)")
+    axes[0].set_ylim(0, max(lim.max(), prof["speed"].max()) * 1.12)
+    axes[0].legend(loc="lower right", ncol=2)
+    panel(axes[0], "(a)")
+
+    # Raw sampled notch is intentionally noisy (the deployable policy is
+    # stochastic); the rolling median exposes the terrain-driven trend.
+    axes[1].step(km, prof["notch"], where="post", color=PURPLE, lw=0.5, alpha=0.45)
+    axes[1].fill_between(km, prof["notch"], step="post", color=PURPLE,
+                         alpha=0.12, lw=0)
+    w = 15
+    if len(prof["notch"]) >= w:
+        pad = w // 2
+        padded = np.pad(prof["notch"].astype(float), pad, mode="edge")
+        trend = np.array([np.median(padded[i:i + w])
+                          for i in range(len(prof["notch"]))])
+        axes[1].plot(km, trend, color=PURPLE, lw=1.3,
+                     label=f"rolling median ({w} decisions)")
+        axes[1].legend(loc="upper right")
+    axes[1].set_ylabel("notch")
+    axes[1].set_ylim(-0.4, 8.4)
+    axes[1].yaxis.set_major_locator(MultipleLocator(4))
+    panel(axes[1], "(b)")
+
+    axes[2].fill_between(cum_km, grade, step="mid", color=GREY, alpha=0.5, lw=0)
+    axes[2].axhline(0, color=INK, lw=0.5)
+    axes[2].set_ylabel("grade (%)")
+    axes[2].set_xlabel("distance along route (km)")
+    axes[2].set_xlim(0, ROUTE_KM)
+    panel(axes[2], "(c)")
+
+    fig.align_ylabels(axes)
+    return save(fig, f"fig_speed_profile_{trip}")
+
+
+# ── 4. where does the energy go? ─────────────────────────────────────────────
+
+def fig_energy_usage(trip="forward"):
+    prof = load_profile(trip)
+    if prof is None or "energy" not in prof:
+        return None
+    cum, _lim, grade = load_links()
+    km = prof["pos"] / 1000.0
+    e = prof["energy"]
+
+    fig, axes = plt.subplots(2, 1, figsize=(COL2, 3.6), sharex=True,
+                             gridspec_kw={"height_ratios": [1.4, 1.0],
+                                          "hspace": 0.14})
+
+    # (a) cumulative energy, against the constant-rate line. Deviation from the
+    # straight line IS the terrain story: above it the policy is paying for a
+    # climb, below it it is coasting.
+    axes[0].plot(km, e, color=ORANGE, lw=1.4, label="cumulative energy")
+    axes[0].fill_between(km, e, color=ORANGE, alpha=0.12, lw=0)
+    axes[0].plot([0, km[-1]], [0, e[-1]], color=GREY, lw=0.8, ls=(0, (4, 2)),
+                 label=f"uniform rate ({e[-1] / km[-1]:.1f} kWh km$^{{-1}}$)")
+    axes[0].set_ylabel("energy (kWh)")
+    axes[0].legend(loc="upper left")
+    axes[0].set_title(f"Total {e[-1]:.0f} kWh over {km[-1]:.1f} km", pad=5)
+    panel(axes[0], "(a)")
+
+    # (b) energy per km against grade — the mechanism behind panel (a)
+    bins = np.arange(0, ROUTE_KM + 1.0, 1.0)
+    idx = np.clip(np.digitize(km, bins) - 1, 0, len(bins) - 2)
+    per_km = np.full(len(bins) - 1, np.nan)
+    for b in range(len(bins) - 1):
+        sel = np.where(idx == b)[0]
+        if len(sel):
+            lo = e[sel[0] - 1] if sel[0] > 0 else 0.0
+            per_km[b] = e[sel[-1]] - lo
+    centres = bins[:-1] + 0.5
+    axes[1].bar(centres, per_km, width=0.9, color=ORANGE, alpha=0.75, lw=0,
+                label="energy per km")
+    axes[1].set_ylabel("kWh km$^{-1}$", color=ORANGE)
+    axes[1].tick_params(axis="y", colors=ORANGE)
+
+    ax_g = axes[1].twinx()
+    ax_g.grid(False)
+    cum_km = cum[1:] / 1000.0
+    grade_km = np.array([grade[(cum_km >= b) & (cum_km < b + 1)].mean()
+                         if np.any((cum_km >= b) & (cum_km < b + 1)) else np.nan
+                         for b in bins[:-1]])
+    ax_g.plot(centres, grade_km, color=INK, lw=1.0, label="mean grade")
+    ax_g.axhline(0, color=INK, lw=0.4, alpha=0.5)
+    ax_g.set_ylabel("mean grade (%)")
+    ax_g.spines["right"].set_visible(True)
+
+    h1, l1 = axes[1].get_legend_handles_labels()
+    h2, l2 = ax_g.get_legend_handles_labels()
+    axes[1].legend(h1 + h2, l1 + l2, loc="upper left", ncol=2)
+    axes[1].set_xlabel("distance along route (km)")
+    axes[1].set_xlim(0, ROUTE_KM)
+    panel(axes[1], "(b)")
+
+    return save(fig, f"fig_energy_usage_{trip}")
+
+
+FIGURES = [
+    ("training progress (forward)", lambda: fig_training_progress("forward"),
+     "python rl/train.py"),
+    ("training progress (return)", lambda: fig_training_progress("return"),
+     "python rl/train_return.py"),
+    ("energy-time frontier", fig_energy_time_tradeoff,
+     "python rl/run_baselines.py"),
+    ("speed profile (forward)", lambda: fig_speed_profile("forward"),
+     "python rl/evaluate.py --stochastic"),
+    ("speed profile (return)", lambda: fig_speed_profile("return"),
+     "python rl/evaluate.py --stochastic --return-trip"),
+    ("energy usage (forward)", lambda: fig_energy_usage("forward"),
+     "python rl/evaluate.py --stochastic"),
+    ("energy usage (return)", lambda: fig_energy_usage("return"),
+     "python rl/evaluate.py --stochastic --return-trip"),
+]
+
+
+def main():
+    print(f"writing figures to {os.path.relpath(OUTDIR, _REPO)}/\n")
+    made = 0
+    for label, fn, howto in FIGURES:
+        out = fn()
+        if out:
+            made += 1
+            print(f"  ✓ {label:<28} {os.path.basename(out)} (+ .pdf)")
+        else:
+            print(f"  – {label:<28} no data — run: {howto}")
+    print(f"\n{made}/{len(FIGURES)} figures written.")
 
 
 if __name__ == "__main__":
-    for fn in (plot_tradeoff, plot_netrainsim, plot_profile, plot_training):
-        out = fn()
-        print(f"wrote {out}" if out else f"skipped {fn.__name__} (missing data)")
+    main()

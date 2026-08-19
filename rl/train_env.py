@@ -39,24 +39,35 @@ SIMULATOR_BIN = os.path.join(
     _REPO, "NeTrainSim-adjusted", _BUILD_DIR,
     "src", "NeTrainSimConsole", "NeTrainSim"
 )
-NODES_FILE  = os.path.join(_REPO, "data", "netrainsim_v2", "nodesFile_v2_fixed.dat")
-# linksFile_v2_clean.dat = linksFile_v2_fixed_speed.dat with DEM elevation-noise
-# grade spikes removed (was ±17% on 50 m segments → physics-breaking resistance
-# and 3.76 kWh/s energy spikes). Regenerate with: python data/clean_grade_spikes.py
-LINKS_FILE  = os.path.join(_REPO, "data", "netrainsim_v2", "linksFile_v2_clean.dat")
+# ACTIVE DATASET: data/real_data/ — 1503 nodes / 1502 links, 75,064 m.
+# Speed limits here are a near-continuous per-segment profile (960 distinct
+# values, 1.42-21.16 m/s), NOT the four regulatory zones of the older v2 data.
+NODES_FILE  = os.path.join(_REPO, "data", "real_data", "nodesFile_real_data.dat")
+LINKS_FILE  = os.path.join(_REPO, "data", "real_data", "linksFile_real_data.dat")
+# NOTE: the trains files still live under netrainsim_v2/ but their paths were
+# updated to 1→1503 / 1503→1, matching the real_data node count. They are
+# route-definition files for the ACTIVE data despite the folder name.
 TRAINS_FILE = os.path.join(_REPO, "data", "netrainsim_v2", "trainsFile_rl.dat")
-# Return trip (Ho'jakent → Toshkent): identical consist, path reversed (1500→1).
-# Same links/route length; net elevation is DOWNHILL (−346.6 m), so the
-# constant-notch frontier differs — see results/return/baselines.txt.
+# Return trip: identical consist, path reversed (1503→1). Forward net elevation
+# on real_data is +181.4 m, so the return is DOWNHILL by the same amount and its
+# constant-notch frontier differs — measure it with
+# `python rl/run_baselines.py --return-trip` (→ results/baselines_return.json).
 TRAINS_FILE_RETURN = os.path.join(_REPO, "data", "netrainsim_v2", "train_return.dat")
 
-TOTAL_ROUTE_LENGTH_M = 74_891.29  # sum of all 1499 link lengths (linksFile_v2_fixed_speed.dat)
+TOTAL_ROUTE_LENGTH_M = 75_064.00  # sum of all 1502 link lengths (linksFile_real_data.dat)
 STATE_PREFIX = "NTS_JSON "
-MAX_STEPS      = 12_000  # hard ceiling; slowest sensible trip (constant notch 2) is ~8,500 steps
-DEADLINE_STEPS = 6_500   # schedule deadline (s). Physical floor ≈ 5,025 s (speed-limit-bound);
-                         # fastest feasible ≈ 5,602 s (notch 8); eco-optimal constant notch 3 ≈
-                         # 6,442 s. 6,500 leaves room to coast for energy while staying on schedule.
-                         # (Times measured on linksFile_v2_clean.dat — rl/run_baselines.py.)
+MAX_STEPS      = 18_000  # hard ceiling. Scaled from the speed-limit floor (~7,100 s) by the
+                         # same ~2.4x margin the previous dataset used (12,000 over a 5,025 s
+                         # floor), so a slow-but-progressing policy is not truncated too early.
+DEADLINE_STEPS = 9_200   # schedule deadline (s). PROVISIONAL — set from the physical floor,
+                         # NOT from a measured frontier. On real_data the speed limits alone
+                         # forbid arriving before ~7,100 s (sum of length/limit; a kinematic
+                         # pass with EMU accel/brake limits agrees at ~7,050 s). 9,200 keeps
+                         # the previous dataset's ~1.3x floor-to-deadline ratio.
+                         # >>> RE-SET THIS after `python rl/run_baselines.py`: pick a value
+                         # above the fastest constant notch so at least one constant-notch
+                         # policy is on-schedule, else every episode is late by construction
+                         # and the pace penalty carries no learnable signal.
 CONTROL_INTERVAL = 15    # action repeat: hold each chosen notch this many simulator seconds, so the
                          # agent makes ~470 decisions per trip instead of ~7,000. Shortening the
                          # decision horizon ~15x makes the long-horizon credit assignment tractable —
@@ -77,10 +88,12 @@ CONTROL_INTERVAL = 15    # action repeat: hold each chosen notch this many simul
 #   truncated(timeout): -TIMEOUT_PENALTY
 # behind_fraction = max(0, step/DEADLINE_STEPS*route_len - position) / route_len, so
 # the penalty is ZERO when on/ahead of schedule — the agent coasts freely where it
-# has slack and is pushed to keep pace only when lagging. Constant-notch curve
-# (clean data, rl/run_baselines.py 2026-06-11): n8=862 kWh/5602 s, n6=853/5652,
-# n5=849/5721, n4=834/5910, n3=789/6442, n2=758/8492; the slowest ON-schedule
-# (≤6500 steps) trajectory ≈ notch 3, so ~789 kWh is the eco target.
+# has slack and is pushed to keep pace only when lagging.
+# The constant-notch frontier for real_data has NOT been measured yet — run
+# `python rl/run_baselines.py` before reading anything into absolute energy
+# numbers, and re-check DEADLINE_STEPS against it. (For reference, the previous
+# v2 dataset gave n8=862 kWh/5602 s … n3=789/6442, eco target n3; real_data is a
+# different route profile and those numbers do not carry over.)
 # Every reward weight and the time-feature ablation read an optional environment
 # override (RL_W_PACE, RL_W_ENERGY, RL_W_SMOOTH, RL_W_OVERSPEED, RL_ABLATE_TIME),
 # so the sensitivity sweep and ablation study set configurations WITHOUT editing
@@ -115,11 +128,13 @@ ABLATE_TIME_FEATURES = os.environ.get("RL_ABLATE_TIME", "0") == "1"
 # reward via its (1-γ)·Φ accumulation over the long episode.
 
 # Normalisation denominators for _state_to_obs
-_SPEED_MAX     = 22.22  # route speed-limit max in m/s (80 km/h)
-_GRADE_MAX     = 4.5    # cleaned route grade range is [-2.7, +4.5] % (linksFile_v2_clean.dat).
-                        # WAS 0.7 (stale v1 value) — with v2 grades up to ±17% raw / ±4.5% clean,
-                        # that clipped ~27% of the route to ±1 = sign-only grade info, blinding
-                        # the agent to exactly the terrain magnitude it must modulate against.
+_SPEED_MAX     = 22.22  # m/s. real_data max limit is 21.16, so this is slightly conservative
+                        # (obs tops out at 0.95 rather than 1.0) — harmless, kept for continuity.
+_GRADE_MAX     = 8.5    # real_data grade range is [-3.49, +8.49] %.
+                        # WAS 4.5 (from linksFile_v2_clean.dat): the four links above 4.5%
+                        # — including the +8.49% climb at link 853 — would all clip to obs 1.0,
+                        # hiding the steepest terrain on the route from the policy at exactly
+                        # the point where notch choice matters most.
 _ENERGY_MAX    = 1.5    # per-step energy cap in kWh. Measured max on clean data = 1.393 kWh/s
                         # (constant notch 8, acceleration transient; steady full power ≈ 1.1).
                         # WAS 0.25 (stale) — clipped any heavy power draw to the same obs value.
@@ -168,9 +183,8 @@ class NeTrainSimEnv(gym.Env):
             if not os.path.isfile(path):
                 raise FileNotFoundError(
                     f"NeTrainSim input file not found: {path}\n"
-                    "The v2 files are checked in under data/netrainsim_v2/; "
-                    "linksFile_v2_clean.dat is regenerated by "
-                    "data/clean_grade_spikes.py"
+                    "All input files are checked in under data/netrainsim_v2/ "
+                    "and are used as-is — there is no generation step."
                 )
 
     def reset(self, seed=None, options=None):

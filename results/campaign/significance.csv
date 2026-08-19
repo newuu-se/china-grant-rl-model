@@ -1,9 +1,0 @@
-trip,w_pace,n,p_energy_vs_wp2,p_lateness_vs_wp2
-forward,0.0,5,1.0,0.4496
-forward,1.0,5,0.9693,0.675
-forward,4.0,5,0.792,1.0
-forward,8.0,5,0.665,1.0
-return,0.0,5,0.4244,0.4437
-return,1.0,5,0.5322,0.4391
-return,4.0,5,0.1313,0.4497
-return,8.0,5,0.0069,0.1671

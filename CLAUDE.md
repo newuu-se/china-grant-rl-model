@@ -18,15 +18,16 @@ Three components:
 
 ```
 data/
-  netrainsim_v2/                  ACTIVE dataset — Toshkent→Ho'jakent, 1500 nodes/1499 links
-    nodesFile_v2_fixed.dat        nodes
-    linksFile_v2_fixed_speed.dat  links with real speed zones (RAW grades — has DEM spikes)
-    linksFile_v2_clean.dat        ← what training uses: spike-cleaned grades
-    trainsFile_rl.dat             ER9E EMU: 3 locos (1213 kW, 60 t, electric) + 3 cars = 373 t
-  clean_grade_spikes.py           regenerates linksFile_v2_clean.dat from _fixed_speed
-  coordinates.csv / data.csv      LEGACY v1 source data (750 nodes, diesel demo)
-  generate_netrainsim_input.py    LEGACY — generates data/netrainsim/ (v1) only
-  netrainsim/                     LEGACY v1 .dat files (not used by training)
+  real_data/                      ACTIVE dataset — 1503 nodes / 1502 links, 75,064 m
+    nodesFile_real_data.dat       nodes (terminals 1 and 1503)
+    linksFile_real_data.dat       ← what training uses
+  netrainsim_v2/                  Mixed: the two trains files are ACTIVE, the rest is dead
+    trainsFile_rl.dat             ACTIVE — ER9E EMU (3 locos 1213 kW + 3 cars = 373 t),
+                                  path repathed to 1→1503 for real_data
+    train_return.dat              ACTIVE — same consist, reversed path (1503→1)
+    nodesFile_v2_fixed.dat        superseded route (1500 nodes)
+    linksFile_v2_clean.dat        superseded route (1499 links, spike-cleaned grades)
+    linksFile_v2_fixed_speed.dat  superseded route (RAW grades, ±17% DEM spikes)
 
 NeTrainSim-adjusted/
   src/
@@ -47,13 +48,28 @@ NeTrainSim-adjusted/
 rl/
   train_env.py                   NeTrainSimEnv (gymnasium.Env, interactive subprocess)
   train.py                       Tianshou PPO training script (build_policy = source of truth)
+  train_return.py                Same trainer, B→A trip → checkpoints/return/
   evaluate.py                    Loads checkpoint, runs greedy/stochastic episode → CSV
-  run_baselines.py               Constant-notch energy/time frontier measurement
-  make_plots.py                  Paper plots into results/plots/
-  requirements.txt               Pinned deps matching installed venv
+  run_baselines.py               Constant-notch frontier → results/baselines_<trip>.json
+  make_plots.py                  The 4 figures → results/plots/ (PNG + PDF)
+  reward_theory.py               Closed-form reward-coefficient analysis (not in the default flow)
 
-venv/                            Python virtualenv (gymnasium 1.3.0, tianshou 0.5.1, torch 2.x)
+requirements.txt                 THE only dependency file (repo root). Python >= 3.10.
+venv/                            Python virtualenv (gymnasium 1.1.1, tianshou 0.5.1, torch 2.x)
 ```
+
+**`results/` is not committed** — it is produced entirely by `run_baselines.py`,
+`evaluate.py` and `make_plots.py`. A fresh clone has none of it; `make_plots.py` skips
+each figure whose inputs are missing and prints the command that creates them.
+
+Every number in `make_plots.py` is read from a file (`results/baselines_<trip>.json`,
+`results/notch_profile_stochastic.csv`, `logs/train_run_*.log`) — never pasted in as a
+constant. Re-measure with `rl/run_baselines.py` and the plots follow automatically.
+
+The four figures: `fig_training_progress_<trip>` (did training work — reward, energy,
+trip time, arrival rate), `fig_energy_time_tradeoff` (frontier + policy),
+`fig_speed_profile_<trip>` (speed/notch/grade along the route),
+`fig_energy_usage_<trip>` (cumulative energy and kWh/km vs grade).
 
 ## Build & Run
 
@@ -66,8 +82,8 @@ macOS: `brew install qt cmake`, then `./build-mac.sh`.
 Run with the active data + trajectory export (run from inside `NeTrainSim-adjusted/`):
 ```bash
 ./build-linux/src/NeTrainSimConsole/NeTrainSim \
-  -n ../data/netrainsim_v2/nodesFile_v2_fixed.dat \
-  -l ../data/netrainsim_v2/linksFile_v2_clean.dat \
+  -n ../data/real_data/nodesFile_real_data.dat \
+  -l ../data/real_data/linksFile_real_data.dat \
   -t ../data/netrainsim_v2/trainsFile_rl.dat \
   -o res -e true -p 1.0
 ```
@@ -79,21 +95,23 @@ default `false` and produces no CSV.
 
 ### Data preparation
 
-```bash
-python data/clean_grade_spikes.py          # regenerates linksFile_v2_clean.dat (ACTIVE data)
-python data/generate_netrainsim_input.py   # LEGACY: regenerates v1 data/netrainsim/*.dat
-```
+None — there is no generation step. The two `.dat` files in `data/real_data/`, plus the two
+trains files in `data/netrainsim_v2/`, are checked in and used as-is.
 
-The v2 nodes/links/trains files are hand-derived (no generator); only the grade-cleaning
-step is scripted. Re-run `clean_grade_spikes.py` if `linksFile_v2_fixed_speed.dat` changes,
-then re-measure baselines: `python rl/run_baselines.py`.
+`real_data` grades have NOT been spike-cleaned (the old dataset's
+`clean_grade_spikes.py` is gone — see git history). They span −3.49…+8.49 %, which is
+plausible rail terrain, but the four links above |4 %| are worth eyeballing if the physics
+misbehaves: on the old route, uncleaned DEM spikes broke the force balance and tripled
+apparent power draw. Re-measure baselines after any data change:
+`python rl/run_baselines.py`.
 
 ### Python RL layer
 
 ```bash
-source venv/bin/activate
-pip install -r rl/requirements.txt   # if venv is fresh
-python rl/train.py
+python3.12 -m venv venv              # REQUIRES Python >= 3.10 (PEP 604 unions);
+source venv/bin/activate             # macOS `python3` is 3.9 and will fail at import
+pip install -r requirements.txt      # the only dependency file
+python rl/train.py 2>&1 | tee logs/train_run_$(date +%Y%m%d_%H%M%S).log
 ```
 
 Validate Gymnasium env compliance before training:
@@ -109,52 +127,38 @@ print('OK')
 
 ## Data Files
 
-### Source data (in `data/`) — LEGACY v1 dataset (active training data is `data/netrainsim_v2/`)
+Active route data lives in `data/real_data/`; the trains files are still in
+`data/netrainsim_v2/` (repathed `1→1503`). All files are ASCII, tab-separated, and
+hand-derived — there is no generator script. Formats below (unchanged between datasets).
 
-**`coordinates.csv`** — tab-separated, no header, 750 rows:
-```
-node_id   x_meters    y_meters
-1         -27375.11   -21357.03
-...
-750        29742.51    18689.05
-```
-Total route: 74.87 km straight-line path (A=node 1, B=node 750).
-Consecutive nodes are ~100 m apart.
+**real_data facts:** 1503 nodes / 1502 links, 75,064 m, segments 34–66 m; speed limits
+1.42–21.16 m/s across **960 distinct values** (a near-continuous profile, not the four
+regulatory zones of the old data); grades −3.49…+8.49 %, net elevation **+181.4 m**;
+curvature 0–0.40; catenary on every link; `directions=2`.
+**Speed-limit timing floor ≈ 7,100 s** — no deadline below that is reachable.
 
-**`data.csv`** — comma-separated, has header, 749 rows (one per link segment):
-```
-,Grade,Curvature,Speed limit
-1,-0.145,0.042,1.0
-...
-```
-- **Grade**: **per mille (‰)** — divided by 10 when writing to linksFile.dat so NeTrainSim sees %
-  (NeTrainSim's Davis formula `20 × weight_tons × grade` expects grade in %). Max: ±6.28‰ = ±0.628%
-- **Curvature**: unit passed through to NeTrainSim as-is
-- **Speed limit**: **m/s** — values are km/h ÷ 3.6: 1.0, 3.0, 11.1(40), 16.6(60), 19.4(70), 22.2(80)
-
-### Generated NeTrainSim input (in `data/netrainsim/`) — LEGACY v1 (format reference still valid for v2 files)
-
-**`nodesFile.dat`** format (ASCII, tab-separated):
+**`nodesFile_real_data.dat`** (1503 nodes; the old `nodesFile_v2_fixed.dat` had 1500):
 ```
 This is the node file of route1		
 <count>  <xScale>  <yScale>           ← scales=1 (coords already in meters)
 <id>  <x>  <y>  <isTerminal>  <dwellTime>  <desc>
 ```
-Nodes 1 and 750 are marked `isTerminal=1`.
+Nodes 1 and 1503 are marked `isTerminal=1`.
 
-**`linksFile.dat`** format (ASCII, tab-separated):
+**`linksFile_real_data.dat`** (1502 links) — the file training reads:
 ```
 This is the link file of route1     (many tabs)
 <count>  <lengthScale>  <speedScale>   ← both=1
 <id>  <from>  <to>  <length_m>  <speed_mps>  <signalNo>  <grade_pct>  <curvature>
        <directions>  <speedVariation>  <hasCatenary>
 ```
-Link lengths are Euclidean distances between consecutive coordinate pairs (meters).
-Speed is in m/s (confirmed in netlink.cpp: `length/freeFlowSpeed` gives seconds).
-Grade is stored as percent (%) — generator divides data.csv ‰ values by 10.
-`directions=1` (unidirectional A→B), `hasCatenary=0` (diesel).
+- Link lengths are Euclidean distances between consecutive coordinates (meters), 34–66 m.
+- **Speed is m/s** (confirmed in netlink.cpp: `length/freeFlowSpeed` gives seconds).
+  Near-continuous, 1.42–21.16 m/s, 960 distinct values.
+- **Grade is percent (%)**, range −3.49 … +8.49 (not spike-cleaned).
+- `hasCatenary=1` (electric), `directions=2` (bidirectional).
 
-**`trainsFile.dat`** format (ASCII):
+**`trainsFile_rl.dat` / `train_return.dat`**:
 ```
 Automatic Trains Definition
 1                                           ← number of trains
@@ -162,8 +166,9 @@ Automatic Trains Definition
 ```
 Loco field order: `Count, Power(kW), TransmissionEff, NoOfAxles, AirDragCoeff, FrontalArea(m²), Length(m), GrossWeight(t), Type`
 Car field order:  `Count, NoOfAxles, AirDragCoeff, FrontalArea(m²), Length(m), GrossWeight(t), TareWeight(t), Type`
-Current config: 1 loco (5000 kW, 90 t, 4 axles) + 4 cars (50 t each) = ~290 t total.
-Locomotive default max speed: 33.33 m/s (100/3); route speed limits are the binding constraint.
+Current config: ER9E EMU — 3 locos (1213 kW, 60 t, type 1 = electric) + 3 cars
+(2×78 t + 37 t) = 373 t. `trainsFile_rl.dat` runs path 1→1500; `train_return.dat` runs
+1500→1. Locomotive default max speed 33.33 m/s; route speed limits are the binding constraint.
 
 ## Architecture
 
@@ -263,7 +268,7 @@ grade/speed zone.
 
 **Episode boundaries:**
 - `terminated=True`: simulator reports the train reached its destination, or
-  `position_m >= TOTAL_ROUTE_LENGTH_M` (74,891.29 m)
+  `position_m >= TOTAL_ROUTE_LENGTH_M` (75,064.00 m — real_data)
 - `truncated=True`: `_step_count >= MAX_STEPS` (12,000) without arriving
 
 ### Tianshou PPO (`rl/train.py`) — tianshou 0.5.1 API
@@ -322,21 +327,28 @@ Rebuild after C++ changes: `cd NeTrainSim-adjusted && ./build-linux.sh`
 
 ## Key Data Facts
 
-- Route: 74.89 km (Toshkent → Ho'jakent line), 1500 nodes, 1499 links, ~50 m per segment.
-  Active input files: `data/netrainsim_v2/{nodesFile_v2_fixed, linksFile_v2_clean, trainsFile_rl}.dat`
+- Route (ACTIVE, `data/real_data/`): 75.064 km, 1503 nodes, 1502 links, 34–66 m per segment.
+  Input files: `data/real_data/{nodesFile_real_data, linksFile_real_data}.dat`
+  + `data/netrainsim_v2/trainsFile_rl.dat` (path 1→1503).
 - Train: ER9E electric multiple unit — 3 locos (1213 kW, 60 t, type 1 = electric) +
   3 cars (2×78 t + 37 t) = 373 t; links have `hasCatenary=1`
-- Speed limits: 11.11, 16.67, 19.44, 22.22 m/s (40, 60, 70, 80 km/h).
-  Distance per zone: 31.0 km @ 40, 15.6 km @ 60, 4.0 km @ 70, 24.3 km @ 80.
-- Grades: RAW v2 file had DEM noise spikes to ±17% (links 887/888, 1204/1205…);
-  `linksFile_v2_clean.dat` (median-filtered elevation, net climb 346.6 m preserved)
-  spans −2.7…+4.5%. ALWAYS use the clean file — the spikes break force balance
-  and triple apparent power draw.
-- Trip-time bounds (clean data): theoretical floor ≈ 5,025 s (speed-limit-bound); fastest
-  feasible ≈ 5,602 s (constant notch 8); RL schedule deadline = 6,500 s (1 step = 1 second)
-- Constant-notch energy/time (clean data, `rl/run_baselines.py`, 2026-06-11):
-  n8=5,602 s/862 kWh, n6=5,652/853, n5=5,721/849, n4=5,910/834, n3=6,442/789,
-  n2=8,492/758 — lower notch = less energy, more time. Eco target ≈ n3.
+- Speed limits: near-continuous, 1.42–21.16 m/s (5–76 km/h), 960 distinct values, mean
+  12.31 m/s. NOT the four zones of the old data. Possibly a MEASURED speed profile rather
+  than legal limits — unconfirmed, and it matters: the sim treats the column as a hard cap,
+  so if it is measured, the agent can only ever drive slower than the real driver did.
+- Grades: −3.49…+8.49 %, net elevation +181.4 m. Four links exceed |4 %|; the steepest is
+  link 853 at +8.49 % (that is why `_GRADE_MAX` is 8.5 — at 4.5 those links clipped).
+- SUPERSEDED (`data/netrainsim_v2/`, route files only): 74.89 km, 1500/1499, four speed
+  zones, net +346.6 m, grades −2.7…+4.5 % after DEM-spike cleaning.
+- Trip-time bounds (ACTIVE real_data): theoretical floor ≈ **7,100 s** (Σ length/limit; a
+  kinematic pass with EMU accel/brake limits agrees at ~7,050 s). `DEADLINE_STEPS = 9,200`
+  is PROVISIONAL — derived from that floor, not measured. **Re-set it from
+  `rl/run_baselines.py` before trusting any training run**: it must exceed the fastest
+  constant notch, else every episode is late by construction and the pace penalty carries
+  no signal. `_ENERGY_MAX` likewise needs setting from the reported `maxE/step`.
+- Constant-notch frontier for real_data: **NOT YET MEASURED**.
+- (Superseded v2 route, for reference only — does NOT transfer: floor ≈ 5,025 s, n8=5,602 s/
+  862 kWh, n3=6,442/789, n2=8,492/758, deadline was 6,500 s, eco target n3.)
 - The simulator hard-caps speed at each link's freeFlowSpeed, so over-speeding is rare
 - At standstill (v=0) the loco applies full adhesion force regardless of notch
   (original NeTrainSim behavior) — the train cannot be parked mid-route
@@ -346,19 +358,16 @@ Rebuild after C++ changes: `cd NeTrainSim-adjusted && ./build-linux.sh`
 ## Testing & Validation
 
 ```bash
-# 1. Regenerate clean grades (only needed if the raw links file changed)
-python data/clean_grade_spikes.py
-
-# 2. Verify simulator runs with the active data (run from inside NeTrainSim-adjusted/)
+# 1. Verify simulator runs with the active data (run from inside NeTrainSim-adjusted/)
 cd NeTrainSim-adjusted && mkdir -p res
 ./build-linux/src/NeTrainSimConsole/NeTrainSim \
-  -n ../data/netrainsim_v2/nodesFile_v2_fixed.dat \
-  -l ../data/netrainsim_v2/linksFile_v2_clean.dat \
+  -n ../data/real_data/nodesFile_real_data.dat \
+  -l ../data/real_data/linksFile_real_data.dat \
   -t ../data/netrainsim_v2/trainsFile_rl.dat \
   -o res -e true -p 1.0        # note: -e takes 'true', not a bare flag
 ls res/trainTrajectory_*.csv
 
-# 3. Validate Gymnasium env
+# 2. Validate Gymnasium env
 python -c "
 import sys; sys.path.insert(0,'.')
 from rl.train_env import NeTrainSimEnv
@@ -367,10 +376,18 @@ check_env(NeTrainSimEnv())
 print('OK')
 "
 
-# 4. Measure constant-notch baselines (recalibrates reward comments/plots)
+# 3. Measure constant-notch baselines → results/baselines_<trip>.json
+#    (make_plots.py reads this file directly; nothing is copy-pasted)
 python rl/run_baselines.py
+python rl/run_baselines.py --return-trip
 
-# 5. Run training (use tmux for long runs), then evaluate
-python rl/train.py
-python rl/evaluate.py          # → results/notch_profile.csv (prefers policy_best.pth)
+# 4. Run training (use tmux for long runs). TEE THE LOG — make_plots reads it
+#    for the training-progress figure; without it that figure cannot be drawn.
+mkdir -p logs
+python rl/train.py 2>&1 | tee logs/train_run_$(date +%Y%m%d_%H%M%S).log
+
+# 5. Evaluate and plot
+python rl/evaluate.py --stochastic   # → results/notch_profile_stochastic.csv
+                                     #   (position, speed, notch, cumulative energy)
+python rl/make_plots.py              # → results/plots/*.png + *.pdf
 ```

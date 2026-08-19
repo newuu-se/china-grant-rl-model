@@ -135,13 +135,14 @@ def run_training(make_env_fn=make_env,
                  ent_anneal_end: int | None = None,
                  constant_entropy: bool = False,
                  save_every: int = 10):
-    """Full PPO training loop. Parameterized so the return trip, the reward
-    sensitivity sweep, and the ablation study all reuse the exact same trainer —
-    only the env factory, checkpoint directory, seed, budget, and entropy
-    schedule differ. Used by train.py, train_return.py, and run_experiment.py.
+    """Full PPO training loop. Parameterized so every run reuses the exact same
+    trainer — only the env factory, checkpoint directory, seed, budget, and
+    entropy schedule differ. Used by train.py and train_return.py. (The reward
+    sweep and ablation study were driven through the same entry point; their
+    launcher scripts are in git history.)
 
     seed              : reproducibility; also seeds the vector envs (seed+10000 for test).
-    max_epoch         : training budget (campaign uses 100; headline runs 200).
+    max_epoch         : training budget (headline runs use 200).
     ent_anneal_end    : epoch where the entropy bonus reaches 0 (default 0.7*max_epoch).
     constant_entropy  : hold ent_coef fixed (the constant-entropy ABLATION).
     save_every        : per-epoch checkpoint cadence; 0 = only best+final (campaign).

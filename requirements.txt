@@ -1,28 +1,23 @@
-absl-py==2.4.0
-cloudpickle==3.1.2
-Farama-Notifications==0.0.4
-filelock==3.29.0
-fsspec==2026.3.0
-grpcio==1.80.0
-gymnasium==1.3.0
-h5py==3.16.0
-Jinja2==3.1.6
-llvmlite==0.47.0
-Markdown==3.10.2
-MarkupSafe==3.0.3
-mpmath==1.3.0
-networkx==3.4.2
-numba==0.65.0
-numpy==2.2.6
-packaging==26.1
-pettingzoo==1.25.0
-pillow==12.2.0
-protobuf==7.34.1
-sympy==1.14.0
-tensorboard==2.20.0
-tensorboard-data-server==0.7.2
-tianshou==0.5.1
-torch==2.11.0
-tqdm==4.67.3
-typing_extensions==4.15.0
-Werkzeug==3.1.8
+# Complete dependency list for this project — the ONLY requirements file.
+#
+# REQUIRES PYTHON >= 3.10. The code uses PEP 604 unions (`int | None`), which
+# raise TypeError at import time on 3.9. macOS ships 3.9 as `python3`, so build
+# the venv with an explicit interpreter:
+#
+#   python3.12 -m venv venv && source venv/bin/activate
+#   pip install -r requirements.txt
+#
+# Runtime (imported directly by rl/):
+gymnasium==1.1.1        # rl/train_env.py — Env API, spaces, env_checker
+tianshou==0.5.1         # rl/train.py     — PPOPolicy, OnpolicyTrainer, SubprocVectorEnv
+numpy>=1.24             # everywhere
+matplotlib>=3.7         # rl/make_plots.py
+
+# Training-log backend. Pulled in transitively by tianshou, but pinned here
+# because the trainer writes to it — an implicit dependency is a trap.
+tensorboard>=2.14
+
+# PyTorch — pick the build that matches your machine, then install this file:
+#   macOS / CPU-only:  pip install torch
+#   CUDA 12.8 (Linux): pip install torch --index-url https://download.pytorch.org/whl/cu128
+torch>=2.0

@@ -101,7 +101,10 @@ def build_policy(checkpoint_path: str) -> PPOPolicy:
 def eval_policy(policy: PPOPolicy, trains_file: str = TRAINS_FILE,
                 stochastic: bool = False) -> dict:
     """Run one greedy/sampled episode and return summary stats only (no CSV).
-    Used by the campaign (rl/run_experiment.py) to score each trained policy."""
+
+    Currently unused by any script in the tree — it was the campaign's scoring
+    hook. Kept because it is the cheapest way to score a checkpoint
+    programmatically (run_episode writes a CSV; this does not)."""
     env = NeTrainSimEnv(trains_file=trains_file)
     obs, _ = env.reset()
     terminated = truncated = False
@@ -176,11 +179,16 @@ def run_episode(policy: PPOPolicy, output_path: str, stochastic: bool = False,
         y_m = float(np.interp(route_pos, cum_pos, ys))
 
         rows.append({
-            "position_m": round(position_m, 3),
-            "x_m":       round(x_m, 3),
-            "y_m":       round(y_m, 3),
-            "speed_mps": round(speed_mps, 4),
-            "notch":     notch,
+            "time_s":         env._step_count,
+            "position_m":     round(position_m, 3),
+            "x_m":            round(x_m, 3),
+            "y_m":            round(y_m, 3),
+            "speed_mps":      round(speed_mps, 4),
+            "notch":          notch,
+            # Cumulative energy is summed by the env over EVERY simulator second,
+            # so it stays correct under action repeat (the state above is only the
+            # last second of the decision).
+            "energy_kwh_cum": round(env._cum_energy_kwh, 5),
         })
 
         step += 1
@@ -199,7 +207,8 @@ def run_episode(policy: PPOPolicy, output_path: str, stochastic: bool = False,
 
     # Write CSV
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    fieldnames = ["position_m", "x_m", "y_m", "speed_mps", "notch"]
+    fieldnames = ["time_s", "position_m", "x_m", "y_m", "speed_mps", "notch",
+                  "energy_kwh_cum"]
     with open(output_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()

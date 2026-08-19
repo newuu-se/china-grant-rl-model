@@ -1,6 +1,0 @@
-ablation,n,energy_mean,energy_ci95,steps_mean,steps_ci95,lateness_mean,lateness_ci95,best_reward_mean,best_reward_ci95,on_sched_frac,p_energy_vs_base,p_lateness_vs_base
-baseline,5,819.74,26.65,6203.0,439.79,0.01,0.02,-2388.36,90.84,0.8,,
-no_smoothness,5,806.69,13.83,6463.2,496.58,0.02,0.05,-2228.66,33.45,0.8,0.2648,1.0
-constant_entropy,5,814.16,35.86,6128.0,354.36,0.0,0.0,-2377.4,111.12,0.8,0.7266,1.0
-no_time_features,5,816.14,23.63,6294.4,479.11,0.01,0.03,-2341.25,105.43,0.6,0.7683,0.7207
-no_pace (w_P=0),5,819.75,39.63,6966.4,1821.69,0.13,0.22,-2324.0,187.89,0.6,1.0,0.4496
